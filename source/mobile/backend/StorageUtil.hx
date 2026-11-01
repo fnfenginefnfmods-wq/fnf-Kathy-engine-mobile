@@ -1,0 +1,118 @@
+/*
+ * Copyright (C) 2025 Mobile Porting Team
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ */
+
+package mobile.backend;
+
+import flixel.util.FlxTimer;
+
+/**
+ * A storage class for mobile.
+ * @author Karim Akra and Homura Akemi (HomuHomu833)
+ */
+class StorageUtil
+{
+	#if sys
+	public static function getStorageDirectory():String
+		return #if android haxe.io.Path.addTrailingSlash(AndroidContext.getExternalFilesDir()) #elseif ios
+			haxe.io.Path.addTrailingSlash(lime.system.System.documentsDirectory) #else Sys.getCwd() #end;
+
+	/**
+	 * 用户可见的数据根目录（mods / saves / logs 都放这里）。
+	 *
+	 * Android 固定为 /sdcard/.KathyEngine/；
+	 * 其余 sys 目标（iOS、桌面等）回落到 getStorageDirectory()，
+	 * 这样非 Android 平台引用该方法时也能编译并拿到可写目录。
+	 */
+	public static function getExternalStorageDirectory():String
+		return #if android '/sdcard/.KathyEngine/' #else getStorageDirectory() #end;
+
+	public static function saveContent(fileName:String, fileData:String, ?alert:Bool = true):Void
+	{
+		final folder:String = getExternalStorageDirectory() + 'saves/';
+		try
+		{
+			if (!FileSystem.exists(folder))
+				FileSystem.createDirectory(folder);
+
+			File.saveContent('$folder/$fileName', fileData);
+			if (alert)
+				CoolUtil.showPopUp(LanguageBasic.getPhrase('file_save_success', '{1} has been saved.', [fileName]), LanguageBasic.getPhrase('mobile_success', "Success!"));
+		}
+		catch (e:Dynamic)
+			if (alert)
+				CoolUtil.showPopUp(LanguageBasic.getPhrase('file_save_fail', '{1} couldn\'t be saved.\n({2})', [fileName, e.message]), LanguageBasic.getPhrase('mobile_error', "Error!"));
+			else
+				trace('$fileName couldn\'t be saved. (${e.message})');
+	}
+
+	#if android
+	public static function requestPermissions():Void
+	{
+		if (AndroidVersion.SDK_INT >= AndroidVersionCode.TIRAMISU)
+			AndroidPermissions.requestPermissions(['READ_MEDIA_IMAGES', 'READ_MEDIA_VIDEO', 'READ_MEDIA_AUDIO', 'READ_MEDIA_VISUAL_USER_SELECTED']);
+		else
+			AndroidPermissions.requestPermissions(['READ_EXTERNAL_STORAGE', 'WRITE_EXTERNAL_STORAGE']);
+
+		// MANAGE_EXTERNAL_STORAGE 只在 API 30 (Android 11+) 存在
+		// API 29 (Android 10) 没有这个权限，直接跳过避免 NoSuchMethodError 闪退
+		if (AndroidVersion.SDK_INT >= AndroidVersionCode.R)
+		{
+			if (!AndroidEnvironment.isExternalStorageManager())
+				AndroidSettings.requestSetting('MANAGE_APP_ALL_FILES_ACCESS_PERMISSION');
+		}
+
+		// 延迟检查权限，给用户时间授予权限
+		// 使用 Sys.sleep 而不是 FlxTimer，因为此时 FlxG 可能还未初始化
+		Sys.sleep(1.0);
+
+		if ((AndroidVersion.SDK_INT >= AndroidVersionCode.TIRAMISU
+			&& !AndroidPermissions.getGrantedPermissions().contains('android.permission.READ_MEDIA_IMAGES'))
+			|| (AndroidVersion.SDK_INT < AndroidVersionCode.TIRAMISU
+				&& !AndroidPermissions.getGrantedPermissions().contains('android.permission.READ_EXTERNAL_STORAGE')))
+			CoolUtil.showPopUp(LanguageBasic.getPhrase('permissions_message', 'If you accepted the permissions you are all good!\nIf you didn\'t then expect a crash\nPress OK to see what happens'),
+				LanguageBasic.getPhrase('mobile_notice', "Notice!"));
+
+		try
+		{
+			if (!FileSystem.exists(StorageUtil.getStorageDirectory()))
+				FileSystem.createDirectory(StorageUtil.getStorageDirectory());
+		}
+		catch (e:Dynamic)
+		{
+			CoolUtil.showPopUp(LanguageBasic.getPhrase('create_directory_error', 'Please create directory to\n{1}\nPress OK to close the game', [StorageUtil.getStorageDirectory()]), LanguageBasic.getPhrase('mobile_error', "Error!"));
+			lime.system.System.exit(1);
+		}
+
+		try
+		{
+			if (!FileSystem.exists(StorageUtil.getExternalStorageDirectory() + 'mods'))
+				FileSystem.createDirectory(StorageUtil.getExternalStorageDirectory() + 'mods');
+		}
+		catch (e:Dynamic)
+		{
+			CoolUtil.showPopUp(LanguageBasic.getPhrase('create_directory_error', 'Please create directory to\n{1}\nPress OK to close the game', [StorageUtil.getExternalStorageDirectory()]), LanguageBasic.getPhrase('mobile_error', "Error!"));
+			lime.system.System.exit(1);
+		}
+	}
+	#end
+	#end
+}

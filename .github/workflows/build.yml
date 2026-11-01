@@ -1,0 +1,180 @@
+name: Build
+
+on:
+  workflow_call:
+    inputs:
+      name:
+        required: true
+        type: string
+      os:
+        required: true
+        type: string
+      setupCommand:
+        required: true
+        type: string
+      buildArgs:
+        required: true
+        type: string
+      artifactName:
+        required: true
+        type: string
+      artifactPath:
+        required: true
+        type: string
+
+env:
+  HAXE_VERSION: 4.3.7
+  PROJECT_NAME: KathyEngine
+
+jobs:
+  build:
+    name: Build
+    runs-on: ${{ inputs.os }}
+    # 兜底：任何一步卡死时，最多 2 小时后整个 job 自动失败，
+    # 而不是一直占着 runner 直到 GitHub 默认的 6 小时上限。
+    timeout-minutes: 120
+    steps:
+      # git 的 smart-HTTP 传输默认没有任何超时保护：一旦服务端限流或连接卡住，
+      # fetch 会静默挂起直到 job 被取消（曾出现 iOS/Windows 卡 20 分钟无输出）。
+      # 这里设置低速阈值，让卡住的 fetch 主动报错退出，从而能被下面的重试捕获。
+      - name: Harden git transport
+        shell: bash
+        run: |
+          git config --global http.version HTTP/1.1
+          git config --global http.postBuffer 524288000
+          git config --global http.lowSpeedLimit 1000
+          git config --global http.lowSpeedTime 60
+
+      # 保留 fetch-depth: 0，因为 debug/GameVersion.hx 需要用
+      # `git rev-list --count HEAD` 统计提交数，浅克隆会让结果恒为 1。
+      # 改用 blob:none 部分克隆：commit/tree 全量保留，历史版本的大文件
+      # （assets 里的 png/ogg 等）不再下载，传输量降低一个数量级。
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@v4
+        continue-on-error: true
+        timeout-minutes: 15
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          fetch-tags: false
+          show-progress: false
+
+      - name: Checkout (retry)
+        if: steps.checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+        timeout-minutes: 15
+        with:
+          fetch-depth: 0
+          filter: blob:none
+          fetch-tags: false
+          show-progress: false
+
+      - name: Setup Haxe
+        uses: krdlab/setup-haxe@v2
+        with:
+          haxe-version: ${{ env.HAXE_VERSION }}
+
+      # Haxe 库 & hxcpp 编译缓存：setupCommand 会跑 haxelib install，
+      # 命中缓存可以跳过大量下载；hxcpp 缓存能避免重复编译 C++ 层。
+      - name: Cache Haxe & hxcpp
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.haxe
+            ~/.hxcpp
+          key: haxe-${{ runner.os }}-${{ inputs.name }}-${{ hashFiles('Project.xml', 'hxformat.json') }}
+          restore-keys: |
+            haxe-${{ runner.os }}-${{ inputs.name }}-
+            haxe-${{ runner.os }}-
+
+      # Android gradle 依赖缓存：首次运行后增量缓存 gradle wrapper + 依赖。
+      - name: Cache Gradle
+        if: inputs.name == 'Android'
+        uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
+      - name: Setup NDK
+        if: inputs.name == 'Android'
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r30
+          add-to-path: false
+
+      - name: Install VLC
+        if: contains(inputs.name, 'Linux')
+        run: |
+          sudo apt-get update -y
+          sudo apt install libvlc-dev libvlccore-dev
+
+      - name: Install Libraries
+        run: ${{ inputs.setupCommand }}
+
+      - name: Config Android
+        if: inputs.name == 'Android'
+        shell: bash
+        run: |
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            java_home="$JAVA_HOME_17_arm64"
+          else
+            java_home="$JAVA_HOME_17_X64"
+          fi
+          echo "Using JAVA_HOME=$java_home"
+          haxelib run lime config ANDROID_SDK "$ANDROID_HOME"
+          haxelib run lime config ANDROID_NDK_ROOT "${{ steps.setup-ndk.outputs.ndk-path }}"
+          haxelib run lime config JAVA_HOME "$java_home"
+          haxelib run lime config ANDROID_SETUP true
+
+      # Android 的 :app:packageRelease 失败时，AGP 只抛一层
+      # "A failure occurred while executing ... IncrementalSplitterRunnable"，
+      # 不带 stacktrace 完全看不出真因（签名/IO/OOM 都长这样）。这里做三件事：
+      #   1) 打包前后打印磁盘与内存余量，用来排除"No space left on device"；
+      #   2) 给 Gradle daemon 显式加大堆（默认堆对 ~900MB 资源的打包偏小）；
+      #   3) 通过 ANDROID_GRADLE_TASK 给 gradlew 追加 --stacktrace，下次能直接看到 Caused by。
+      - name: Android pre-build diagnostics
+        if: inputs.name == 'Android'
+        shell: bash
+        run: |
+          echo "--- disk before build ---"
+          df -h "$RUNNER_TEMP" /
+          echo "--- memory before build ---"
+          free -m
+          echo "--- gradle user home ---"
+          mkdir -p ~/.gradle
+          printf 'org.gradle.jvmargs=-Xmx4096m -XX:MaxMetaspaceSize=1024m -Dfile.encoding=UTF-8\n' >> ~/.gradle/gradle.properties
+          echo "ANDROID_GRADLE_TASK=assembleRelease --stacktrace" >> $GITHUB_ENV
+
+      - name: Compile
+        run: haxelib run lime build ${{ inputs.buildArgs }}
+
+      - name: Android post-build diagnostics
+        if: always() && inputs.name == 'Android'
+        shell: bash
+        run: |
+          echo "--- disk after build ---"
+          df -h "$RUNNER_TEMP" /
+          echo "--- biggest build dirs ---"
+          du -sh export/release/android/* 2>/dev/null | sort -h | tail -n 10 || true
+
+      - name: Make IPA
+        if: inputs.name == 'iOS'
+        run: |
+          brew install ldid
+          cd export/release/ios/build/Release-iphoneos/${{ env.PROJECT_NAME }}.app
+          ldid -S../../../${{ env.PROJECT_NAME }}/${{ env.PROJECT_NAME }}.entitlements ${{ env.PROJECT_NAME }}
+          cd ..
+          mkdir Payload
+          mv ${{ env.PROJECT_NAME }}.app Payload
+          zip -r ${{ env.PROJECT_NAME }}.ipa Payload
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifactName }}
+          path: ${{ inputs.artifactPath }}
+          if-no-files-found: error
