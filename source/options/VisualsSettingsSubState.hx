@@ -1,0 +1,757 @@
+package options;
+
+import objects.Note;
+import objects.StrumNote;
+import objects.NoteSplash;
+import objects.Alphabet;
+
+class VisualsSettingsSubState extends BaseOptionsMenu
+{
+	var noteOptionID:Int = -1;
+	var notes:FlxTypedGroup<StrumNote>;
+	var splashes:FlxTypedGroup<NoteSplash>;
+	var noteY:Float = 90;
+
+	// 可选样式面板（聚焦 noteSkins / noteSplashes 时从右侧飞入）
+	var noteSkinList:Array<String> = [];
+	var splashSkinList:Array<String> = [];
+	var skinPanelBG:FlxSprite;
+	var skinPanelLines:Array<FlxText> = [];
+	var panelMode:String = null; // 'noteSkin' / 'splashSkin' / null
+	var panelHiddenX:Float = 0;
+	var panelLineH:Float = 28;
+	var panelPadX:Float = 14;
+	var panelPadY:Float = 12;
+	var panelMargin:Float = 16;
+	public function new()
+	{
+		title = LanguageBasic.getPhrase('visuals_menu', 'Visuals Settings');
+		rpcTitle = 'Visuals Settings Menu'; //for Discord Rich Presence
+
+		// for note skins and splash skins
+		notes = new FlxTypedGroup<StrumNote>();
+		splashes = new FlxTypedGroup<NoteSplash>();
+		for (i in 0...Note.colArray.length)
+		{
+			var note:StrumNote = new StrumNote(370 + (560 / Note.colArray.length) * i, -200, i, 0);
+			changeNoteSkin(note);
+			notes.add(note);
+			
+			var splash:NoteSplash = new NoteSplash(0, 0, NoteSplash.defaultNoteSplash + NoteSplash.getSplashSkinPostfix());
+			splash.inEditor = true;
+			splash.babyArrow = note;
+			splash.ID = i;
+			splash.kill();
+			splashes.add(splash);
+		}
+
+		// options
+		var option:Option = new Option(Language.get('arrow_color_mode'),
+			Language.get('arrow_colormode_desc'),
+			'arrowColorMode',
+			STRING,
+			['RGB', 'HSV']);
+		addOption(option);
+		option.onChange = onChangeArrowColorMode;
+
+		var noteSkins:Array<String> = Mods.mergeAllTextsNamed('images/noteSkins/list.txt');
+		if(noteSkins.length > 0)
+		{
+			if(!noteSkins.contains(ClientPrefs.data.noteSkin))
+				ClientPrefs.data.noteSkin = ClientPrefs.defaultData.noteSkin;
+
+			noteSkins.insert(0, ClientPrefs.defaultData.noteSkin);
+			noteSkinList = noteSkins;
+			var option:Option = new Option(Language.get('note_skins'),
+				Language.get("noteskin_desc"),
+				'noteSkin',
+				STRING,
+				noteSkins);
+			addOption(option);
+			option.onChange = onChangeNoteSkin;
+			noteOptionID = optionsArray.length - 1;
+		}
+		
+		var noteSplashes:Array<String> = Mods.mergeAllTextsNamed('images/noteSplashes/list.txt');
+		if(noteSplashes.length > 0)
+		{
+			if(!noteSplashes.contains(ClientPrefs.data.splashSkin))
+				ClientPrefs.data.splashSkin = ClientPrefs.defaultData.splashSkin;
+
+			noteSplashes.insert(0, ClientPrefs.defaultData.splashSkin);
+			splashSkinList = noteSplashes;
+			var option:Option = new Option(Language.get('note_splashes'),
+				Language.get("notesplash_desc"),
+				'splashSkin',
+				STRING,
+				noteSplashes);
+			addOption(option);
+			option.onChange = onChangeSplashSkin;
+		}
+
+		var holdCoverSkins:Array<String> = Mods.mergeAllTextsNamed('images/holdCover/list.txt');
+		if(holdCoverSkins.length > 0)
+		{
+			if(!holdCoverSkins.contains(ClientPrefs.data.holdCoverSkin))
+				ClientPrefs.data.holdCoverSkin = ClientPrefs.defaultData.holdCoverSkin;
+
+			holdCoverSkins.insert(0, ClientPrefs.defaultData.holdCoverSkin);
+			var option:Option = new Option(Language.get('hold_cover_skin'),
+				Language.get("hold_cover_skin_desc"),
+				'holdCoverSkin',
+				STRING,
+				holdCoverSkins);
+			addOption(option);
+		}
+
+		var option:Option = new Option(Language.get('note_splash_opacity'),
+			Language.get("notesplashopacity_desc"),
+			'splashAlpha',
+			PERCENT);
+		option.scrollSpeed = 1.6;
+		option.minValue = 0.0;
+		option.maxValue = 1;
+		option.changeValue = 0.1;
+		option.decimals = 1;
+		addOption(option);
+		option.onChange = playNoteSplashes;
+
+		var option:Option = new Option(Language.get('hide_hud'),
+			Language.get("hidehud_desc"),
+			'hideHud',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('3_state_icons_normal_lose_win'),
+			Language.get("three_icons_desc"),
+			'threeIcons',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('load_leather_icons'),
+			Language.get("load_leather_icons_desc"),
+			'loadLeatherIcons',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('opponent_splashes'),
+			Language.get("opponent_splashes_desc"),
+			'opponentSplashes',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('hold_covers'),
+			Language.get("hold_covers_desc"),
+			'holdCovers',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('opponent_hold_covers'),
+			Language.get("opponent_hold_covers_desc"),
+			'opponentHoldCovers',
+			BOOL);
+		addOption(option);
+		
+		var option:Option = new Option(Language.get('time_bar'),
+			Language.get("timebar_desc"),
+			'timeBarType',
+			STRING,
+			['Time Left', 'Time Elapsed', 'Song Name', 'Disabled']);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('flashing_lights'),
+			Language.get("flashinglights_desc"),
+			'flashing',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('camera_zooms'),
+			Language.get("camerazooms_desc"),
+			'camZooms',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('score_text_grow_on_hit'),
+			Language.get("scoretextgrow_desc"),
+			'scoreZoom',
+			BOOL);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('scoretext_language'),
+			Language.get("scoretextlanguage_desc"),
+			'scoreLanguage',
+			STRING,
+			['auto', 'en_us', 'zh_cn', 'zh_tw', 'ja', 'ko', 'kc_cn']);
+		addOption(option);
+
+		var option:Option = new Option(Language.get('health_bar_opacity'),
+			Language.get("healthbaropacity_desc"),
+			'healthBarAlpha',
+			PERCENT);
+		option.scrollSpeed = 1.6;
+		option.minValue = 0.0;
+		option.maxValue = 1;
+		option.changeValue = 0.1;
+		option.decimals = 1;
+		addOption(option);
+		
+		var option:Option = new Option(Language.get('fps_counter'),
+			Language.get("showfps_desc"),
+			'showFPS',
+			BOOL);
+		addOption(option);
+		option.onChange = onChangeFPSCounter;
+
+		var option:Option = new Option(Language.get('fps_counter_style'),
+			Language.get("fps_counter_style_desc"),
+			'fpsStyle',
+			STRING,
+			['Psych', 'Simple', 'V-Slice']);
+		addOption(option);
+		option.onChange = onChangeFPSStyle;
+
+		var option:Option = new Option(Language.get('fps_counter_layer'),
+			Language.get("fps_counter_layer_desc"),
+			'fpsLayer',
+			STRING,
+			['Stage', 'Game']);
+		addOption(option);
+		option.onChange = onChangeFPSLayer;
+		
+		var option:Option = new Option(Language.get('psych_fps_settings'),
+			Language.get("fps_settings_button_desc"),
+			'_fpsSettings',
+			BUTTON);
+		addOption(option);
+		option.onChange = function() {
+			MusicBeatState.switchState(new FPSCounterSettingsState());
+		};
+		
+		var option:Option = new Option(Language.get('simple_fps_settings'),
+			Language.get("simple_info_settings_button_desc"),
+			'_simpleInfoSettings',
+			BUTTON);
+		addOption(option);
+		option.onChange = function() {
+			MusicBeatState.switchState(new SimpleInfoDisplaySettingsState());
+		};
+
+		var option:Option = new Option(Language.get('debug_fps_settings'),
+			Language.get("debug_fps_settings_desc"),
+			'_debugSettings',
+			BUTTON);
+		addOption(option);
+		option.onChange = function() {
+			MusicBeatState.switchState(new DebugDisplaySettingsState());
+		};
+
+		//新版lime跟git库的不同，故临时禁用此项，之后也许会改
+		/*#if native
+		var option:Option = new Option(Language.get('vsync'),
+			Language.get("vsync_desc"),
+			'vsync',
+			BOOL);
+		option.onChange = onChangeVSync;
+		addOption(option);
+		#end*/
+		
+		var option:Option = new Option(Language.get('pause_music'),
+			Language.get("pausemusic_desc"),
+			'pauseMusic',
+			STRING,
+			['None', 'Tea Time', 'Breakfast', 'Breakfast (Pico)', "Romantic Smile"]);
+		addOption(option);
+		option.onChange = onChangePauseMusic;
+		
+		#if CHECK_FOR_UPDATES
+		var option:Option = new Option(Language.get('check_for_updates'),
+			Language.get("checkforupdates_desc"),
+			'checkForUpdates',
+			BOOL);
+		addOption(option);
+		#end
+
+	#if DISCORD_ALLOWED
+	var option:Option = new Option(Language.get('discord_rich_presence'),
+		Language.get("discordrpc_desc"),
+		'discordRPC',
+		BOOL);
+	addOption(option);
+	#end
+
+	var option:Option = new Option(Language.get('disable_networking'),
+		Language.get("disable_networking_desc"),
+		'disableNetworking',
+		BOOL);
+	addOption(option);
+
+
+		var option:Option = new Option(Language.get('combo_stacking'),
+		Language.get("combostacking_desc"),
+		'comboStacking',
+		BOOL);
+	addOption(option);
+
+	var option:Option = new Option(Language.get('single_hold_animation'),
+		Language.get("single_hold_note_animation_desc"),
+		'singleHoldNoteAnimation',
+		BOOL);
+	addOption(option);
+
+	var option:Option = new Option(Language.get('auto_reset_strum_animation'),
+		Language.get("auto_reset_strum_anim_desc"),
+		'autoResetStrumAnim',
+		BOOL);
+	addOption(option);
+
+	var option:Option = new Option(Language.get('fallback_perfect_to_sick'),
+		Language.get("fallback_perfect_to_sick_desc"),
+		'fallbackPerfectToSick',
+		BOOL);
+	addOption(option);
+
+	var option:Option = new Option(Language.get('fallback_ex_perfect_to_sick'),
+		Language.get("fallback_experfect_to_sick_desc"),
+		'fallbackEXPerfectToSick',
+		BOOL);
+	addOption(option);
+
+	var soundTrayOptions:Array<String> = ['Flixel', 'Funkin', 'Kathy', 'Dave'];
+	var option:Option = new Option(Language.get('sound_tray_style'),
+		Language.get("sound_tray_style_desc"),
+		'soundTrayStyle',
+		STRING,
+		soundTrayOptions);
+	addOption(option);
+	
+	var option:Option = new Option(Language.get('hold_note_behind'),
+		Language.get("hold_note_behind_desc"),
+		'holdNoteBehind',
+		BOOL);
+	addOption(option);
+
+	var option:Option = new Option(Language.get('legacy_main_menu_ui'),
+		Language.get("legacy_main_menu_desc"),
+		'legacyMainMenu',
+		BOOL);
+	addOption(option);
+
+	// Fake OS 伪装设置
+	var option:Option = new Option(Language.get('fake_os_mode'),
+		Language.get("fake_os_mode_desc"),
+		'fakeOSMode',
+		BOOL);
+	addOption(option);
+	option.onChange = onChangeFakeOSMode;
+
+	#if !mobile
+	var option:Option = new Option(Language.get('fake_window_title'),
+		Language.get("fake_window_title_desc"),
+		'fakeWindowTitlePreset',
+		STRING,
+		["Kathy Engine", "Friday Night Funkin': MintRhythm Engine", "Friday Night Funkin': OS Engine", "Friday Night Funkin': Psych Engine", "Friday Night Funkin'", "FNF", "WTF in FNF", "Rhythm Game", "Not FNF", "Just a Game"]);
+	addOption(option);
+	option.onChange = onChangeFakeWindowTitle;
+	#end
+
+	var option:Option = new Option(Language.get('fake_os_version'),
+		Language.get("fake_os_version_desc"),
+		'fakeOSVersion',
+		STRING,
+		["1.0.0", "1.0.1", "1.1.0", "1.2.0", "1.3.0", "1.3.1", "1.4.0", "1.4.1", "1.5.0", "1.5.1"]);
+	addOption(option);
+		option.onChange = onChangeFakeOSMode;
+
+		// ===== 动态窗口标题 (Dynamic Window Title) =====
+		#if !mobile
+		var option:Option = new Option(Language.get('dynamic_window_title'),
+			Language.get('wintitle_dynamic'),
+			'dynamicWindowTitle',
+			BOOL);
+		option.onChange = function() { Main.updateWindowTitle(); };
+		addOption(option);
+
+		var option:Option = new Option(Language.get('show_current_screen'),
+			Language.get('wintitle_state'),
+			'windowTitleShowState',
+			BOOL);
+		option.onChange = function() { Main.updateWindowTitle(); };
+		addOption(option);
+
+		var option:Option = new Option(Language.get('show_current_mod'),
+			Language.get('wintitle_mod'),
+			'windowTitleShowMod',
+			BOOL);
+		option.onChange = function() { Main.updateWindowTitle(); };
+		addOption(option);
+
+		var option:Option = new Option(Language.get('show_current_song'),
+			Language.get('wintitle_song'),
+			'windowTitleShowSong',
+			BOOL);
+		option.onChange = function() { Main.updateWindowTitle(); };
+		addOption(option);
+
+		var option:Option = new Option(Language.get('show_song_difficulty'),
+			Language.get('wintitle_difficulty'),
+			'windowTitleShowDifficulty',
+			BOOL);
+		option.onChange = function() { Main.updateWindowTitle(); };
+		addOption(option);
+		#end
+
+		super();
+		add(notes);
+		add(splashes);
+
+		// 样式选择面板（半透明黑底 + 右侧飞入）
+		skinPanelBG = new FlxSprite();
+		skinPanelBG.makeGraphic(1, 1, FlxColor.BLACK);
+		skinPanelBG.alpha = 0.5;
+		skinPanelBG.scrollFactor.set();
+		panelHiddenX = FlxG.width + 80;
+		skinPanelBG.x = panelHiddenX;
+		skinPanelBG.y = (FlxG.height - skinPanelBG.height) / 2;
+		add(skinPanelBG); // 加在文本之下
+	}
+
+	var notesShown:Bool = false;
+	override function changeSelection(change:Int = 0, skipRefresh:Bool = false, skipDesc:Bool = false)
+	{
+		super.changeSelection(change, skipRefresh, skipDesc);
+		
+		// 样式面板已统一到 BaseOptionsMenu 的通用 STRING 候选面板，这里不再单独显示
+		var isSkinMode:Bool = false;
+
+		switch(curOption.variable)
+		{
+			case 'noteSkin', 'splashSkin', 'splashAlpha':
+				if(!notesShown)
+				{
+					for (note in notes.members)
+					{
+						FlxTween.cancelTweensOf(note);
+						FlxTween.tween(note, {y: noteY}, Math.abs(note.y / (200 + noteY)) / 3, {ease: FlxEase.quadInOut});
+					}
+				}
+				notesShown = true;
+				if(curOption.variable.startsWith('splash') && Math.abs(notes.members[0].y - noteY) < 25) playNoteSplashes();
+
+			default:
+				if(notesShown) 
+				{
+					for (note in notes.members)
+					{
+						FlxTween.cancelTweensOf(note);
+						FlxTween.tween(note, {y: -200}, Math.abs(note.y / (200 + noteY)) / 3, {ease: FlxEase.quadInOut});
+					}
+				}
+				notesShown = false;
+		}
+
+		// 样式选择面板：仅在聚焦 noteSkin / splashSkin 时显示
+		if (isSkinMode)
+		{
+			var mode:String = curOption.variable;
+			if (panelMode != mode)
+			{
+				var wasShown:Bool = (panelMode != null);
+				panelMode = mode;
+				rebuildSkinPanel(mode, !wasShown);
+			}
+			showSkinPanel();
+		}
+		else if (panelMode != null)
+		{
+			hideSkinPanel();
+			panelMode = null;
+		}
+	}
+
+	// ---------- 可选样式面板（HSV 标记 + 右侧飞入）----------
+
+	function getNoteSkinFile(skin:String):String
+	{
+		var base:String = 'noteSkins/NOTE_assets';
+		if (skin != ClientPrefs.defaultData.noteSkin)
+			base += '-' + skin.toLowerCase().replace(' ', '_');
+		return base;
+	}
+
+	function getSplashSkinFile(skin:String):String
+	{
+		var base:String = 'noteSplashes/noteSplashes';
+		if (skin != ClientPrefs.defaultData.splashSkin)
+			base += '-' + skin.toLowerCase().replace(' ', '-');
+		return base;
+	}
+
+	// 检测 hsv 目录是否存在与 rgb 样式同名的文件
+	function hasHSVVersion(path:String):Bool
+	{
+		var parts:Array<String> = path.split('/');
+		var filename:String = parts.pop();
+		var folder:String = parts.join('/');
+		return Paths.fileExists('images/$folder/hsv/$filename.png', IMAGE);
+	}
+
+	function getStyleLabel(skin:String, file:String):String
+	{
+		// 当前为 HSV 渲染且存在 hsv 同名文件时，左侧加入 (HSV) 前缀
+		if (ClientPrefs.data.arrowColorMode == 'HSV' && hasHSVVersion(file))
+			return '(HSV) ' + skin;
+		return skin;
+	}
+
+	// 根据当前模式重建面板内容。flyIn=true 时内容先放到屏幕外以便飞入
+	function rebuildSkinPanel(mode:String, flyIn:Bool)
+	{
+		for (line in skinPanelLines)
+		{
+			remove(line);
+			line.destroy();
+		}
+		skinPanelLines = [];
+
+		var list:Array<String> = (mode == 'noteSkin') ? noteSkinList : splashSkinList;
+		var current:String = (mode == 'noteSkin') ? ClientPrefs.data.noteSkin : ClientPrefs.data.splashSkin;
+
+		var maxW:Float = 0;
+		for (skin in list)
+		{
+			var file:String = (mode == 'noteSkin') ? getNoteSkinFile(skin) : getSplashSkinFile(skin);
+			var label:String = getStyleLabel(skin, file);
+			var txt:FlxText = new FlxText(0, 0, 0, label, 22);
+			txt.setFormat(Paths.font("vcr.ttf"), 22, (skin == current) ? FlxColor.YELLOW : FlxColor.WHITE,
+				RIGHT, FlxTextBorderStyle.OUTLINE, FlxColor.BLACK);
+			txt.borderSize = 1.5;
+			txt.scrollFactor.set();
+			skinPanelLines.push(txt);
+			add(txt); // 加在背景之上
+			if (txt.width > maxW) maxW = txt.width;
+		}
+
+		var bgW:Float = maxW + panelPadX * 2;
+		var bgH:Float = list.length * panelLineH + panelPadY * 2;
+		skinPanelBG.makeGraphic(Math.ceil(bgW), Math.ceil(bgH), FlxColor.BLACK);
+		skinPanelBG.alpha = 0.5;
+
+		var targetBGX:Float = FlxG.width - panelMargin - bgW;
+		var targetBGY:Float = (FlxG.height - bgH) / 2;
+		var startX:Float = flyIn ? panelHiddenX : targetBGX;
+
+		skinPanelBG.x = startX;
+		skinPanelBG.y = targetBGY;
+
+		for (i => line in skinPanelLines)
+		{
+			line.x = startX + panelPadX;
+			line.y = targetBGY + panelPadY + i * panelLineH + (panelLineH - line.height) / 2;
+			line.fieldWidth = maxW;
+		}
+	}
+
+	function tweenSkinPanelTo(targetBGX:Float)
+	{
+		FlxTween.cancelTweensOf(skinPanelBG);
+		FlxTween.tween(skinPanelBG, {x: targetBGX}, 0.3, {ease: FlxEase.quartOut});
+		for (line in skinPanelLines)
+		{
+			FlxTween.cancelTweensOf(line);
+			FlxTween.tween(line, {x: targetBGX + panelPadX}, 0.3, {ease: FlxEase.quartOut});
+		}
+	}
+
+	function showSkinPanel()
+	{
+		if (skinPanelLines.length == 0) return;
+		var targetBGX:Float = FlxG.width - panelMargin - skinPanelBG.width;
+		tweenSkinPanelTo(targetBGX);
+	}
+
+	function hideSkinPanel()
+	{
+		tweenSkinPanelTo(panelHiddenX);
+	}
+
+	function refreshSkinPanelHighlight()
+	{
+		if (panelMode == null) return;
+		var current:String = (panelMode == 'noteSkin') ? ClientPrefs.data.noteSkin : ClientPrefs.data.splashSkin;
+		var list:Array<String> = (panelMode == 'noteSkin') ? noteSkinList : splashSkinList;
+		for (i => line in skinPanelLines)
+		{
+			if (i < list.length)
+				line.color = (list[i] == current) ? FlxColor.YELLOW : FlxColor.WHITE;
+		}
+	}
+
+	var changedMusic:Bool = false;
+	function onChangePauseMusic()
+	{
+		if(ClientPrefs.data.pauseMusic == 'None')
+			FlxG.sound.music.volume = 0;
+		else
+			FlxG.sound.playMusic(Paths.music(Paths.formatToSongPath(ClientPrefs.data.pauseMusic)));
+
+		changedMusic = true;
+	}
+
+	function onChangeArrowColorMode()
+	{
+		Note.globalRgbShaders = [];
+		Note.globalColorSwapShaders = [];
+
+		notes.forEachAlive(function(n) n.destroy());
+		notes.clear();
+		splashes.forEachAlive(function(s) s.destroy());
+		splashes.clear();
+
+		for (i in 0...Note.colArray.length)
+		{
+			var note:StrumNote = new StrumNote(370 + (560 / Note.colArray.length) * i, -200, i, 0);
+			changeNoteSkin(note);
+			notes.add(note);
+
+			var splash:NoteSplash = new NoteSplash(0, 0, NoteSplash.defaultNoteSplash + NoteSplash.getSplashSkinPostfix());
+			splash.inEditor = true;
+			splash.babyArrow = note;
+			splash.ID = i;
+			splash.kill();
+			splashes.add(splash);
+		}
+	}
+
+	function onChangeNoteSkin()
+	{
+		notes.forEachAlive(function(note:StrumNote) {
+			changeNoteSkin(note);
+			note.centerOffsets();
+			note.centerOrigin();
+		});
+		refreshSkinPanelHighlight();
+	}
+
+	function changeNoteSkin(note:StrumNote)
+	{
+		var baseSkin:String = Note.defaultNoteSkin;
+		var postfix:String = Note.getNoteSkinPostfix();
+		var customBase:String = baseSkin + postfix;
+
+		var customExists:Bool = false;
+		if(ClientPrefs.data.arrowColorMode == 'HSV')
+		{
+			var parts:Array<String> = customBase.split('/');
+			var filename:String = parts.pop();
+			var folder:String = parts.join('/');
+			customExists = Paths.fileExists('images/$folder/hsv/$filename.png', IMAGE) || Paths.fileExists('images/$customBase.png', IMAGE);
+		}
+		else
+		{
+			customExists = Paths.fileExists('images/$customBase.png', IMAGE);
+		}
+
+		var skin:String = customExists ? Note.getNoteSkinPath(customBase) : Note.getNoteSkinPath(baseSkin);
+
+		note.texture = skin;
+		note.reloadNote();
+		note.playAnim('static');
+	}
+
+	function onChangeSplashSkin()
+	{
+		var skin:String = NoteSplash.defaultNoteSplash + NoteSplash.getSplashSkinPostfix();
+		for (splash in splashes)
+			splash.loadSplash(skin);
+
+		playNoteSplashes();
+		refreshSkinPanelHighlight();
+	}
+
+	function playNoteSplashes()
+	{
+		var rand:Int = 0;
+		if (splashes.members[0] != null && splashes.members[0].maxAnims > 1)
+			rand = FlxG.random.int(0, splashes.members[0].maxAnims - 1); // For playing the same random animation on all 4 splashes
+
+		for (splash in splashes)
+		{
+			splash.revive();
+
+			splash.spawnSplashNote(0, 0, splash.ID, null, false);
+			if (splash.maxAnims > 1)
+				splash.noteData = splash.noteData % Note.colArray.length + (rand * Note.colArray.length);
+
+			var anim:String = splash.playDefaultAnim();
+			var conf = splash.config.animations.get(anim);
+			var offsets:Array<Float> = [0, 0];
+
+			var minFps:Int = 22;
+			var maxFps:Int = 26;
+			if (conf != null)
+			{
+				offsets = conf.offsets;
+
+				minFps = conf.fps[0];
+				if (minFps < 0) minFps = 0;
+
+				maxFps = conf.fps[1];
+				if (maxFps < 0) maxFps = 0;
+			}
+
+			splash.offset.set(10, 10);
+			if (offsets != null)
+			{
+				splash.offset.x += offsets[0];
+				splash.offset.y += offsets[1];
+			}
+
+			if (splash.animation.curAnim != null)
+				splash.animation.curAnim.frameRate = FlxG.random.int(minFps, maxFps);
+		}
+	}
+
+	override function destroy()
+	{
+		if(changedMusic && !OptionsState.onPlayState) FlxG.sound.playMusic(Paths.music('freakyMenu'), 1, true);
+		Note.globalRgbShaders = [];
+		Note.globalColorSwapShaders = [];
+		super.destroy();
+	}
+
+	function onChangeFPSCounter()
+	{
+		Main.updateFPSCounterVisibility();
+	}
+
+	function onChangeFPSStyle()
+	{
+		Main.updateFPSLayer();
+	}
+
+	function onChangeFPSLayer()
+	{
+		Main.updateFPSLayer();
+	}
+
+	// Fake OS 相关函数
+	function onChangeFakeOSMode()
+	{
+		#if (!mobile && !html5)
+		Main.updateWindowTitle();
+		#end
+	}
+
+	function onChangeFakeWindowTitle()
+	{
+		ClientPrefs.data.fakeWindowTitle = ClientPrefs.data.fakeWindowTitlePreset;
+		#if (!mobile && !html5)
+		Main.updateWindowTitle();
+		#end
+	}
+
+	/*#if native
+	function onChangeVSync()
+		lime.app.Application.current.window.vsync = ClientPrefs.data.vsync;
+	#end*/
+}

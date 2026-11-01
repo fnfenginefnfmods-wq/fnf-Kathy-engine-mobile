@@ -1,0 +1,40 @@
+﻿﻿<?xml version="1.0" encoding="utf-8"?>
+<TextureAtlas imagePath="noteSplashes-leather.png">
+	<!-- Created with Adobe Animate version 22.0.0.93 -->
+	<!-- http://www.adobe.com/products/animate.html -->
+	<SubTexture name="splash leather red 10000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 10001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 10002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 10003" x="0" y="190" width="184" height="192" frameX="-1" frameY="-1" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 20000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 20001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 20002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather red 20003" x="184" y="190" width="188" height="198"/>
+	
+	<SubTexture name="splash leather blue 10000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 10001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 10002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 10003" x="0" y="190" width="184" height="192" frameX="-1" frameY="-1" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 20000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 20001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 20002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather blue 20003" x="184" y="190" width="188" height="198"/>
+	
+	<SubTexture name="splash leather purple 10000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 10001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 10002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 10003" x="0" y="190" width="184" height="192" frameX="-1" frameY="-1" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 20000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 20001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 20002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather purple 20003" x="184" y="190" width="188" height="198"/>
+	
+	<SubTexture name="splash leather green 10000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 10001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 10002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 10003" x="0" y="190" width="184" height="192" frameX="-1" frameY="-1" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 20000" x="0" y="0" width="108" height="118" frameX="-31" frameY="-37" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 20001" x="108" y="0" width="164" height="184" frameX="-11" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 20002" x="272" y="0" width="182" height="190" frameX="-1" frameY="-2" frameWidth="188" frameHeight="198"/>
+	<SubTexture name="splash leather green 20003" x="184" y="190" width="188" height="198"/>
+</TextureAtlas>
