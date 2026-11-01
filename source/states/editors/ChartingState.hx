@@ -1,0 +1,7299 @@
+package states.editors;
+
+import flixel.FlxSubState;
+import flixel.util.FlxSave;
+import flixel.util.FlxSort;
+import flixel.util.FlxSpriteUtil;
+import flixel.util.FlxStringUtil;
+import flixel.util.FlxDestroyUtil;
+import flixel.input.keyboard.FlxKey;
+import flixel.tweens.FlxEase;
+
+import lime.utils.Assets;
+import lime.media.AudioBuffer;
+
+import flash.media.Sound;
+import flash.geom.Rectangle;
+
+import haxe.Json;
+import haxe.Exception;
+import haxe.io.Bytes;
+
+import states.editors.content.MetaNote;
+import states.editors.content.VSlice;
+import states.editors.content.Prompt;
+import states.editors.content.*;
+
+import backend.Song;
+import backend.StageData;
+import backend.Highscore;
+import backend.Difficulty;
+
+import objects.Character;
+import objects.HealthIcon;
+import objects.Note;
+import objects.StrumNote;
+
+using DateTools;
+
+typedef UndoStruct = {
+	var action:UndoAction;
+	var data:Dynamic;
+}
+
+enum abstract UndoAction(String)
+{
+	var ADD_NOTE = 'Add Note';
+	var DELETE_NOTE = 'Delete Note';
+	var MOVE_NOTE = 'Move Note';
+	var SELECT_NOTE = 'Select Note';
+}
+
+enum abstract ChartingTheme(String)
+{
+	var LIGHT = 'light';
+	var DARK = 'dark';
+	var DEFAULT = 'default';
+	var VSLICE = 'vslice';
+	var CUSTOM = 'custom';
+}
+
+enum abstract WaveformTarget(String)
+{
+	var INST = 'inst';
+	var PLAYER = 'voc';
+	var OPPONENT = 'opp';
+}
+
+class ChartingState extends MusicBeatState implements PsychUIEventHandler.PsychUIEvent
+{
+	public static final defaultEvents:Array<Array<String>> =
+	[
+		['', "Nothing. Yep, that's right."], //Always leave this one empty pls
+		['Dadbattle Spotlight', "Used in Dad Battle,\nValue 1: 0/1 = ON/OFF,\n2 = Target Dad\n3 = Target BF"],
+		['Hey!', "Plays the \"Hey!\" animation from Bopeebo,\nValue 1: BF = Only Boyfriend, GF = Only Girlfriend,\nSomething else = Both.\nValue 2: Custom animation duration,\nleave it blank for 0.6s"],
+		['Set GF Speed', "Sets GF head bopping speed,\nValue 1: 1 = Normal speed,\n2 = 1/2 speed, 4 = 1/4 speed etc.\nUsed on Fresh during the beatbox parts.\n\nWarning: Value must be integer!"],
+		['Philly Glow', "Exclusive to Week 3\nValue 1: 0/1/2 = OFF/ON/Reset Gradient\n \nNo, i won't add it to other weeks."],
+		['Kill Henchmen', "For Mom's songs, don't use this please, i love them :("],
+		['Add Camera Zoom', "Used on MILF on that one \"hard\" part\nValue 1: Camera zoom add (Default: 0.015)\nValue 2: UI zoom add (Default: 0.03)\nLeave the values blank if you want to use Default."],
+		['BG Freaks Expression', "Should be used only in \"school\" Stage!"],
+		['Trigger BG Ghouls', "Should be used only in \"schoolEvil\" Stage!"],
+		['Play Animation', "Plays an animation on a Character,\nonce the animation is completed,\nthe animation changes to Idle\n\nValue 1: Animation to play.\nValue 2: Character (Dad, BF, GF)"],
+		['Camera Follow Pos', "Value 1: X\nValue 2: Y\n\nThe camera won't change the follow point\nafter using this, for getting it back\nto normal, leave both values blank."],
+		['Alt Idle Animation', "Sets a specified postfix after the idle animation name.\nYou can use this to trigger 'idle-alt' if you set\nValue 2 to -alt\n\nValue 1: Character to set (Dad, BF or GF)\nValue 2: New postfix (Leave it blank to disable)"],
+		['Screen Shake', "Value 1: Camera shake\nValue 2: HUD shake\n\nEvery value works as the following example: \"1, 0.05\".\nThe first number (1) is the duration.\nThe second number (0.05) is the intensity."],
+		['Change Character', "Value 1: Character to change (Dad, BF, GF)\nValue 2: New character's name"],
+		['Change Scroll Speed', "Value 1: Scroll Speed Multiplier (1 is default)\nValue 2: Time it takes to change fully in seconds (empty is instantly achieved)\nValue 3: Easing type (linear is default)"],
+		['Set Property', "Value 1: Variable name\nValue 2: New value"],
+		['Play Sound', "Value 1: Sound file name\nValue 2: Volume (Default: 1), ranges from 0 to 1"],
+		//未完成
+		['Change Window Title', "Value 1: Window title name"],
+		['Change Opponent Scroll Speed', "same as Change Scroll Speed, but only for Opponent"],
+		['Change Player Scroll Speed', "same as Change Scroll Speed, but only for Player"],
+		['Toggle IconBop', "Enable or disable icon bopping.\nValue 1: on/off/true/false/0/1 (default: on)"],
+		['Add IconBop', "Make the health icons bop once immediately."]
+	];
+	
+	public static var keysArray:Array<FlxKey> = [ONE, TWO, THREE, FOUR, FIVE, SIX, SEVEN, EIGHT]; //Used for Vortex Editor
+	public static var SHOW_EVENT_COLUMN = true;
+	public static var EVENT_TRACK_COUNT = 4; // Event轨道数量，用于分散同一时间点的多个event
+	public static var GRID_COLUMNS_PER_PLAYER = 4;
+	public static var GRID_PLAYERS = 2;
+	public static var GRID_SIZE = 40;
+	public static var TRACK_SPACING = 20; // 轨道之间的间距（半个grid方格）
+	final BACKUP_EXT = '.bkp';
+
+	public var quantizations:Array<Int> = [
+		4,
+		8,
+		12,
+		16,
+		20,
+		24,
+		32,
+		48,
+		64,
+		96,
+		192
+	];
+	public var quantColors:Array<FlxColor> = [
+		0xFFDF0000,
+		0xFF4040CF,
+		0xFFAF00AF,
+		0xFFFFAF00,
+		0xFFFFFFFF,
+		0xFFFFA0FF,
+		0xFFFF6030,
+		0xFF00CFCF,
+		0xFF00CF00,
+		0xFF9F9F9F,
+		0xFF3F3F3F,
+	];
+	var curQuant(default, set):Int = 16;
+	function set_curQuant(v:Int)
+	{
+		curQuant = v;
+		updateVortexColor();
+		return curQuant;
+	}
+	function updateVortexColor()
+		vortexIndicator.color = quantColors[Std.int(FlxMath.bound(quantizations.indexOf(curQuant), 0, quantColors.length - 1))];
+
+	var sectionFirstNoteID:Int = 0;
+	var sectionFirstEventID:Int = 0;
+	var curSec:Int = 0;
+	
+	// 不受noteOffset影响的纯粹播放信息（用于右下角显示）
+	var curSecPure:Int = 0;
+	var curBeatPure:Int = 0;
+	var curStepPure:Int = 0;
+	
+	// 优化音符加载：预保存数据，延迟创建 MetaNote
+	var preloadedNoteData:Array<Dynamic> = [];
+	var preloadedSecNum:Array<Int> = [];
+	var preloadedMetaNotes:Array<MetaNote> = [];
+
+	var chartEditorSave:FlxSave;
+	var mainBox:PsychUIBox;
+	var mainBoxPosition:FlxPoint = FlxPoint.get(920, 40);
+	var infoBox:PsychUIBox;
+	var infoBoxPosition:FlxPoint = FlxPoint.get(1000, 360);
+	var upperBox:PsychUIBox;
+	
+	var camUI:FlxCamera;
+	var camChart:FlxCamera;
+
+	// 角色对象
+	public var dad:Character;
+	public var boyfriend:Character;
+	public var showCharactersCheckBox:PsychUICheckBox;
+	public var charactersLoaded:Bool = false;
+
+	// idle动画重新播放标记（初始为true，让角色开始播放idle动画）
+	private var boyfriendNeedIdleReplay:Bool = true;
+	private var dadNeedIdleReplay:Bool = true;
+
+	// sing Duration完成时的beat记录（用于在下一拍播放idle）
+	private var boyfriendSingFinishedBeat:Null<Int> = null;
+	private var dadSingFinishedBeat:Null<Int> = null;
+
+	// 角色拖动相关
+	private var isDraggingCharacter:Bool = false;
+	private var draggedCharacter:Character = null;
+	private var dragOffsetX:Float = 0;
+	private var dragOffsetY:Float = 0;
+
+	// 碰撞箱绘制相关
+	private var dadHitboxSprites:FlxSpriteGroup;
+	private var boyfriendHitboxSprites:FlxSpriteGroup;
+
+	// 角色拖动范围可视化相关
+	private var dadDragRangeSprites:FlxSpriteGroup;
+	private var boyfriendDragRangeSprites:FlxSpriteGroup;
+	private var showDragRangeCheckBox:PsychUICheckBox;
+
+	// 角色拖动范围定义
+	private var dadDragRange:{minX:Float, maxX:Float, minY:Float, maxY:Float};
+	private var boyfriendDragRange:{minX:Float, maxX:Float, minY:Float, maxY:Float};
+
+	function drawCharacterHitbox(char:Character, spriteGroup:FlxSpriteGroup, color:FlxColor):Void
+	{
+		if (char == null || !char.visible || !char.isOnScreen(camChart))
+		{
+			// 隐藏所有碰撞箱sprite
+			for (spr in spriteGroup.members)
+				spr.visible = false;
+			return;
+		}
+
+		@:privateAccess
+		var lineSize:Int = Std.int(Math.max(2, Math.floor(3 / camChart.zoom)));
+
+		var sprX:Float = char.x - char.offset.x;
+		var sprY:Float = char.y - char.offset.y;
+		var sprWidth:Int = Std.int(char.frameWidth * char.scale.x);
+		var sprHeight:Int = Std.int(char.frameHeight * char.scale.y);
+
+		// 确保有4个sprite可用
+		while(spriteGroup.members.length < 4)
+		{
+			var spr:FlxSprite = new FlxSprite().makeGraphic(1, 1, color);
+			spr.alpha = 0.8;
+			spr.cameras = [camChart];
+			spriteGroup.add(spr);
+		}
+
+		for (num => sel in spriteGroup.members)
+		{
+			sel.x = sprX;
+			sel.y = sprY;
+			sel.cameras = [camChart];
+			switch(num)
+			{
+				case 0: //Top
+					sel.setGraphicSize(sprWidth, lineSize);
+				case 1: //Bottom
+					sel.setGraphicSize(sprWidth, lineSize);
+					sel.y += sprHeight - lineSize;
+				case 2: //Left
+					sel.setGraphicSize(lineSize, sprHeight);
+				case 3: //Right
+					sel.setGraphicSize(lineSize, sprHeight);
+					sel.x += sprWidth - lineSize;
+			}
+			sel.updateHitbox();
+			sel.scrollFactor.set(char.scrollFactor.x, char.scrollFactor.y);
+			sel.visible = true;
+		}
+	}
+	
+
+	private var lastBeat:Int = 0;
+
+	// Sing动画相关
+	private var singAnimations:Array<String> = ['singLEFT', 'singDOWN', 'singUP', 'singRIGHT'];
+
+	var prevOpponentGridBg:ChartingGridSprite;
+	var prevEventGridBg:ChartingGridSprite;
+	var prevPlayerGridBg:ChartingGridSprite;
+	var opponentGridBg:ChartingGridSprite;
+	var eventGridBg:ChartingGridSprite;
+	var playerGridBg:ChartingGridSprite;
+	var nextOpponentGridBg:ChartingGridSprite;
+	var nextEventGridBg:ChartingGridSprite;
+	var nextPlayerGridBg:ChartingGridSprite;
+	var waveformSprite:FlxSprite;
+	var scrollY:Float = 0;
+	
+	// Grid轨道颜色覆盖层
+	var playerTrackOverlay:FlxSprite; // 玩家轨道（蓝色）
+	var opponentTrackOverlay:FlxSprite; // 对手轨道（红色）
+	var eventTrackOverlay:FlxSprite; // Event轨道（黄色）
+
+	var iconbopTween:FlxTween;
+
+	var zoomList:Array<Float> = [
+		0.25,
+		0.5,
+		1,
+		2,
+		3,
+		4,
+		6,
+		8,
+		12,
+		16,
+		24
+	];
+	var curZoom:Float = 1;
+
+	var mustHitIndicator:FlxSprite;
+	var eventIcon:FlxSprite;
+	var icons:Array<HealthIcon> = [];
+
+	var events:Array<EventMetaNote> = [];
+	var notes:Array<MetaNote> = [];
+
+	var behindRenderedNotes:FlxTypedGroup<MetaNote> = new FlxTypedGroup<MetaNote>();
+	var curRenderedNotes:FlxTypedGroup<MetaNote> = new FlxTypedGroup<MetaNote>();
+	var movingNotes:FlxTypedGroup<MetaNote> = new FlxTypedGroup<MetaNote>();
+	var eventLockOverlay:FlxSprite;
+	var vortexIndicator:FlxSprite;
+	var strumLineNotes:FlxTypedGroup<StrumNote> = new FlxTypedGroup<StrumNote>();
+	var dummyArrow:FlxSprite;
+	var isMovingNotes:Bool = false;
+	var movingNotesLastData:Int = 0;
+	var movingNotesLastY:Float = 0;
+	
+	var vocals:FlxSound = new FlxSound();
+	var opponentVocals:FlxSound = new FlxSound();
+	
+	// 击打声音效池 - 用于高密度音符播放
+	var hitSoundPool:Array<FlxSound> = [];
+	var hitSoundPoolSize:Int = 16; // 池大小
+	var hitSoundPoolIndex:Int = 0; // 轮询索引
+
+	// 轨道颜色标识控制
+	var trackColorsCheckBox:PsychUICheckBox; // 主题设置中的复选框
+	var trackSeparators:Array<FlxSprite> = []; // 轨道分隔线
+
+	// 视觉效果控制变量
+	var iconBopEnabled:Bool = true;        // 小图标跳动开关
+	var bgBopEnabled:Bool = false;         // 背景跳动开关
+	var mustHitTweenEnabled:Bool = true;   // 倒三角tween开关
+	var bgBopTween:FlxTween;             // 背景跳动tween
+
+	var timeLine:FlxSprite;
+	var infoText:FlxText;
+
+	var autoSaveIcon:FlxSprite;
+	var outputTxt:FlxText;
+
+	var selectionStart:FlxPoint = FlxPoint.get();
+	var selectionBox:FlxSprite;
+
+	var _shouldReset:Bool = true;
+	public function new(?shouldReset:Bool = true)
+	{
+		this._shouldReset = shouldReset;
+		super();
+	}
+
+	var bg:FlxSprite;
+	var theme:ChartingTheme = DEFAULT;
+
+	var copiedNotes:Array<Dynamic> = [];
+	var copiedEvents:Array<Dynamic> = [];
+	
+	var _keysPressedBuffer:Array<Bool> = [];
+
+	var tipBg:FlxSprite;
+	var fullTipText:FlxText;
+	
+	var vortexEnabled:Bool = false;
+	var waveformEnabled:Bool = false;
+	var waveformTarget:WaveformTarget = INST;
+
+	// 定义全局字体变量
+	public static var defaultFont:String = Paths.font(Language.get('uitab_font'));
+
+	override function create()
+	{
+		if(Difficulty.list.length < 1) Difficulty.resetList();
+		_keysPressedBuffer.resize(keysArray.length);
+
+if(_shouldReset) Conductor.songPosition = 0;
+	persistentUpdate = false;
+	FlxG.mouse.visible = true;
+	FlxG.sound.list.add(vocals);
+	FlxG.sound.list.add(opponentVocals);
+	
+	// 初始化击打声音效池
+	for (i in 0...hitSoundPoolSize)
+	{
+		hitSoundPool[i] = new FlxSound();
+		FlxG.sound.list.add(hitSoundPool[i]);
+	}
+
+		vocals.autoDestroy = false;
+		vocals.looped = true;
+		opponentVocals.autoDestroy = false;
+		opponentVocals.looped = true;
+
+	initPsychCamera();
+	camUI = new FlxCamera();
+	camUI.bgColor.alpha = 0;
+	FlxG.cameras.add(camUI, false);
+
+	camChart = new FlxCamera();
+	camChart.bgColor.alpha = 0;
+	FlxG.cameras.add(camChart, false);
+
+		chartEditorSave = new FlxSave();
+		chartEditorSave.bind('chart_editor_data', CoolUtil.getSavePath());
+
+		bg = new FlxSprite().loadGraphic(Paths.image('menuDesat'));
+		bg.antialiasing = ClientPrefs.data.antialiasing;
+		bg.scrollFactor.set();
+		add(bg);
+
+		if(chartEditorSave.data.autoSave != null) autoSaveCap = chartEditorSave.data.autoSave;
+		if(chartEditorSave.data.backupLimit != null) backupLimit = chartEditorSave.data.backupLimit;
+		if(chartEditorSave.data.vortex != null) vortexEnabled = chartEditorSave.data.vortex;
+
+		if(chartEditorSave.data.customBgColor == null) chartEditorSave.data.customBgColor = '303030';
+		if(chartEditorSave.data.customGridColors == null || chartEditorSave.data.customGridColors.length < 2)
+			chartEditorSave.data.customGridColors = ['DFDFDF', 'BFBFBF'];
+		if(chartEditorSave.data.customNextGridColors == null || chartEditorSave.data.customNextGridColors.length < 2)
+			chartEditorSave.data.customNextGridColors = ['5F5F5F', '4A4A4A'];
+		
+		changeTheme(chartEditorSave.data.theme != null ? chartEditorSave.data.theme : DEFAULT, false);
+
+		createGrids();
+
+		var gridLayout = getGridLayout();
+		waveformSprite = new FlxSprite(gridLayout.startX, 0).makeGraphic(1, 1, 0x00FFFFFF);
+		waveformSprite.scrollFactor.x = 0;
+		waveformSprite.visible = false;
+		add(waveformSprite);
+
+		dummyArrow = new FlxSprite().makeGraphic(1, 1, FlxColor.WHITE);
+		dummyArrow.setGraphicSize(GRID_SIZE, GRID_SIZE);
+		dummyArrow.updateHitbox();
+		dummyArrow.scrollFactor.x = 0;
+		add(dummyArrow);
+
+		vortexIndicator = new FlxSprite(gridLayout.startX - GRID_SIZE, FlxG.height/2).loadGraphic(Paths.image('editors/vortex_indicator'));
+		vortexIndicator.setGraphicSize(GRID_SIZE);
+		vortexIndicator.updateHitbox();
+		vortexIndicator.scrollFactor.set();
+		vortexIndicator.active = false;
+		updateVortexColor();
+		add(vortexIndicator);
+
+		// 创建轨道颜色覆盖层 - 只在gridBg显示的区域，放在strumLineNotes之前
+		var gridHeight:Float = opponentGridBg.height; // 只覆盖grid显示的高度
+
+		// 初始化轨道颜色显示设置
+		if(chartEditorSave.data.showTrackColors == null) chartEditorSave.data.showTrackColors = true;
+		// 初始化轨道分隔线显示设置
+		if(chartEditorSave.data.showTrackSeparators == null) chartEditorSave.data.showTrackSeparators = true;
+
+		// 新轨道布局：对手(0-3) → Event(4-7) → 玩家(8-11)
+		var gridY:Float = 0; // 从屏幕顶部开始，覆盖整个屏幕
+		var extraHeight:Int = 500; // 增加500像素缓冲确保覆盖整个网格区域
+		var gridLayout = getGridLayout();
+
+		// 对手轨道覆盖层（最左侧，UI列0-3）
+		opponentTrackOverlay = new FlxSprite(gridLayout.opponentX, gridY).makeGraphic(GRID_SIZE * GRID_COLUMNS_PER_PLAYER, Std.int(gridHeight) + extraHeight, 0xFFCC88FF); // 浅紫色
+		opponentTrackOverlay.alpha = 0.15;
+		opponentTrackOverlay.scrollFactor.set(0, 0); // X和Y方向都固定，不随网格滚动
+		opponentTrackOverlay.visible = chartEditorSave.data.showTrackColors;
+		add(opponentTrackOverlay);
+
+		// Event轨道覆盖层（中间，UI列4-7）- 4列宽度
+		if(SHOW_EVENT_COLUMN)
+		{
+			eventTrackOverlay = new FlxSprite(gridLayout.eventX, gridY).makeGraphic(GRID_SIZE * EVENT_TRACK_COUNT, Std.int(gridHeight) + extraHeight, 0xFFFFFF44); // 黄色
+			eventTrackOverlay.alpha = 0.15;
+			eventTrackOverlay.scrollFactor.set(0, 0); // X和Y方向都固定，不随网格滚动
+			eventTrackOverlay.visible = chartEditorSave.data.showTrackColors;
+			add(eventTrackOverlay);
+		}
+
+		// 玩家轨道覆盖层（最右侧，UI列8-11）
+		playerTrackOverlay = new FlxSprite(gridLayout.playerX, gridY).makeGraphic(GRID_SIZE * GRID_COLUMNS_PER_PLAYER, Std.int(gridHeight) + extraHeight, 0xFF88CCFF); // 浅蓝色
+		playerTrackOverlay.alpha = 0.15;
+		playerTrackOverlay.scrollFactor.set(0, 0); // X和Y方向都固定，不随网格滚动
+		playerTrackOverlay.visible = chartEditorSave.data.showTrackColors;
+		add(playerTrackOverlay);
+
+
+
+		// 添加轨道之间的垂直分隔线（新布局：对手(0-3) → Event(4-7) → 玩家(8-11)）
+		var totalColumns:Int = GRID_PLAYERS * GRID_COLUMNS_PER_PLAYER + (SHOW_EVENT_COLUMN ? EVENT_TRACK_COUNT : 0);
+
+		// 对手/Event之间的分隔线（在第3列后）
+		if(SHOW_EVENT_COLUMN)
+		{
+			var separatorX1:Float = gridLayout.opponentX + GRID_SIZE * GRID_COLUMNS_PER_PLAYER + TRACK_SPACING / 2 - 2;
+			var separator1 = new FlxSprite(separatorX1, gridY).makeGraphic(4, Std.int(gridHeight) + extraHeight, FlxColor.BLACK);
+			separator1.alpha = 1.0; // 黑色分隔线完全不透明
+			separator1.scrollFactor.set(0, 0); // X和Y方向都固定，不随网格滚动
+			separator1.visible = chartEditorSave.data.showTrackSeparators; // 由新选项控制
+			add(separator1);
+			trackSeparators.push(separator1);
+
+			// Event/玩家之间的分隔线（在第7列后）
+			var separatorX2:Float = gridLayout.eventX + GRID_SIZE * EVENT_TRACK_COUNT + TRACK_SPACING / 2 - 2;
+			var separator2 = new FlxSprite(separatorX2, gridY).makeGraphic(4, Std.int(gridHeight) + extraHeight, FlxColor.BLACK);
+			separator2.alpha = 1.0; // 黑色分隔线完全不透明
+			separator2.scrollFactor.set(0, 0); // X和Y方向都固定，不随网格滚动
+			separator2.visible = chartEditorSave.data.showTrackSeparators; // 由新选项控制
+			add(separator2);
+			trackSeparators.push(separator2);
+		}
+
+
+
+		// 初始化碰撞箱绘制所需的FlxSpriteGroup
+		dadHitboxSprites = new FlxSpriteGroup();
+		dadHitboxSprites.cameras = [camChart];
+		add(dadHitboxSprites);
+
+		boyfriendHitboxSprites = new FlxSpriteGroup();
+		boyfriendHitboxSprites.cameras = [camChart];
+		add(boyfriendHitboxSprites);
+
+		// 初始化拖动范围绘制所需的FlxSpriteGroup
+		dadDragRangeSprites = new FlxSpriteGroup();
+		dadDragRangeSprites.cameras = [camChart];
+		add(dadDragRangeSprites);
+
+		boyfriendDragRangeSprites = new FlxSpriteGroup();
+		boyfriendDragRangeSprites.cameras = [camChart];
+		add(boyfriendDragRangeSprites);
+
+		add(strumLineNotes);
+
+		add(behindRenderedNotes);
+		add(curRenderedNotes);
+		add(movingNotes);
+
+		eventLockOverlay = new FlxSprite(SHOW_EVENT_COLUMN ? gridLayout.eventX : gridLayout.opponentX, 0).makeGraphic(1, 1, FlxColor.BLACK);
+		eventLockOverlay.alpha = 0.6;
+		eventLockOverlay.visible = false;
+		eventLockOverlay.scrollFactor.x = 0;
+		eventLockOverlay.scale.x = GRID_SIZE * EVENT_TRACK_COUNT;
+		eventLockOverlay.updateHitbox();
+		add(eventLockOverlay);
+
+		timeLine = new FlxSprite(gridLayout.startX, 0).makeGraphic(1, 1, FlxColor.WHITE);
+		timeLine.setGraphicSize(Std.int(gridLayout.totalWidth), 4);
+		timeLine.updateHitbox();
+		timeLine.screenCenter(Y);
+		timeLine.scrollFactor.set();
+		add(timeLine);
+
+
+		var startX:Float = gridLayout.startX;
+		var startY:Float = FlxG.height/2;
+		vortexIndicator.visible = strumLineNotes.visible = strumLineNotes.active = vortexEnabled;
+
+		// 新布局：strumLineNotes显示在对手和玩家轨道区域
+		// noteData 0-3（原玩家）→ UI列8-11（玩家）
+		// noteData 4-7（原对手）→ UI列0-3（对手）
+		for (i in 0...Std.int(GRID_PLAYERS * GRID_COLUMNS_PER_PLAYER))
+		{
+			var noteData:Int = i % GRID_COLUMNS_PER_PLAYER;
+			var isPlayer:Bool = i < 4; // 前4个是玩家（noteData 0-3），后4个是对手（noteData 0-3）
+			var uiColumn:Int = isPlayer ? (noteData + 8) : noteData; // 玩家→8-11，对手→0-3
+
+			// 根据逻辑列号计算额外的间距偏移
+			var spacingOffset:Float = 0;
+			if (uiColumn >= GRID_COLUMNS_PER_PLAYER)
+			{
+				spacingOffset += TRACK_SPACING; // Event轨道后的间距
+			}
+			if (uiColumn >= GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT)
+			{
+				spacingOffset += TRACK_SPACING; // 玩家轨道前的间距
+			}
+
+			var note:StrumNote = new StrumNote(gridLayout.startX + (GRID_SIZE * uiColumn) + spacingOffset, startY, noteData, 0);
+			note.scrollFactor.set();
+			note.playAnim('static');
+			note.alpha = 0.4;
+
+			note.updateHitbox();
+			if(note.width > note.height)
+				note.setGraphicSize(GRID_SIZE);
+			else
+				note.setGraphicSize(0, GRID_SIZE);
+
+			note.updateHitbox();
+			note.x += GRID_SIZE/2 - note.width/2;
+			note.y += GRID_SIZE/2 - note.height/2;
+			strumLineNotes.add(note);
+		}
+
+
+		// 为Grid格子添加颜色滤镜（新布局：对手(0-3) → Event(4-7) → 玩家(8-11)）
+		if(opponentGridBg != null)
+		{
+			// 对手轨道列（0-3）添加红色调
+			for (i in 0...GRID_COLUMNS_PER_PLAYER)
+			{
+				opponentGridBg.stripe.color = 0xFFFF4488; // 红色
+			}
+
+			// Event轨道列（4-7）添加黄色调
+			if(SHOW_EVENT_COLUMN)
+			{
+				for (i in GRID_COLUMNS_PER_PLAYER...(GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT))
+				{
+					eventGridBg.stripe.color = 0xFFFFFF44; // 黄色
+				}
+			}
+
+			// 玩家轨道列（8-11）添加蓝色调
+			for (i in (GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT)...(GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT + GRID_COLUMNS_PER_PLAYER))
+			{
+				playerGridBg.stripe.color = 0xFF4488FF; // 蓝色
+			}
+		}
+
+
+
+		var gridStripes:Array<Int> = [];
+		var iconY:Float = 50;
+
+		mustHitIndicator = FlxSpriteUtil.drawTriangle(new FlxSprite(0, iconY - 20).makeGraphic(16, 16, FlxColor.TRANSPARENT), 0, 0, 16);
+		mustHitIndicator.scrollFactor.set();
+		mustHitIndicator.flipY = true;
+		mustHitIndicator.offset.x += mustHitIndicator.width/2;
+		add(mustHitIndicator);
+
+		// Event图标（新布局：在Event轨道中心，UI列5.5）
+		if(SHOW_EVENT_COLUMN)
+		{
+			eventIcon = new FlxSprite(0, iconY).loadGraphic(Paths.image('editors/eventIcon'));
+			eventIcon.antialiasing = ClientPrefs.data.antialiasing;
+			eventIcon.alpha = 0.6;
+			eventIcon.setGraphicSize(30, 30);
+			eventIcon.updateHitbox();
+			eventIcon.scrollFactor.set();
+
+			add(eventIcon);
+			// Event轨道的起始偏移：GRID_COLUMNS_PER_PLAYER（对手4列），中心点再偏移2列
+			eventIcon.x = gridLayout.eventX + GRID_SIZE * 2 - eventIcon.width/2;
+		}
+
+		// 为对手和玩家添加图标（修复后：交换位置）
+		for (i in 0...GRID_PLAYERS)
+		{
+			// icons[0]是对手，icons[1]是玩家（顺序不变，仅交换位置）
+			var icon:HealthIcon = new HealthIcon();
+			icon.autoAdjustOffset = false;
+			icon.y = iconY;
+			icon.alpha = 0.6;
+			icon.scrollFactor.set();
+			icon.scale.set(0.3, 0.3);
+			icon.updateHitbox();
+			icon.ID = i + 1;
+			add(icon);
+			icons.push(icon);
+			// 修复逻辑：i=0（对手）用玩家偏移，i=1（玩家）用对手偏移
+			var iconStartOffset:Int = (i == 0) ? (GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT) : 0;
+			icon.x = gridLayout.startX + GRID_SIZE * iconStartOffset + (iconStartOffset > 0 ? TRACK_SPACING * 2 : 0) + GRID_SIZE * (GRID_COLUMNS_PER_PLAYER / 2) - icon.width / 2;
+		}
+		opponentGridBg.stripes = prevOpponentGridBg.stripes = nextOpponentGridBg.stripes = gridStripes;
+		if(SHOW_EVENT_COLUMN) eventGridBg.stripes = prevEventGridBg.stripes = nextEventGridBg.stripes = gridStripes;
+		playerGridBg.stripes = prevPlayerGridBg.stripes = nextPlayerGridBg.stripes = gridStripes;
+
+
+
+		selectionBox = new FlxSprite().makeGraphic(1, 1, FlxColor.CYAN);
+		selectionBox.alpha = 0.4;
+		selectionBox.blend = ADD;
+		selectionBox.scrollFactor.set();
+		selectionBox.visible = false;
+		add(selectionBox);
+
+		infoBox = new PsychUIBox(infoBoxPosition.x #if mobile - 900 #end, infoBoxPosition.y #if mobile - 250 #end, 220, 220, [Language.get('charting_infotab_text')]);
+		infoBox.scrollFactor.set();
+		infoBox.cameras = [camUI];
+		infoText = new FlxText(15, 15, 230, '', 16);
+		infoText.scrollFactor.set();
+		infoBox.getTab(Language.get('charting_infotab_text')).menu.add(infoText);
+		add(infoBox);
+
+		mainBox = new PsychUIBox(mainBoxPosition.x, mainBoxPosition.y, 350, 300, [Language.get('charting_charting_text'), Language.get('charting_data_text'), Language.get('charting_events_text'), Language.get('charting_notes_text'), Language.get('charting_section_text'), Language.get('charting_song_text')]);
+		mainBox.selectedName = Language.get('charting_song_text');
+		mainBox.scrollFactor.set();
+		mainBox.cameras = [camUI];
+		add(mainBox);
+
+		autoSaveIcon = new FlxSprite(50).loadGraphic(Paths.image('editors/autosave'));
+		autoSaveIcon.screenCenter(Y);
+		autoSaveIcon.scale.set(0.6, 0.6);
+		autoSaveIcon.antialiasing = ClientPrefs.data.antialiasing;
+		autoSaveIcon.scrollFactor.set();
+		autoSaveIcon.alpha = 0;
+		add(autoSaveIcon);
+
+		// save data positions for the UI boxes
+		if(chartEditorSave.data.mainBoxPosition != null && chartEditorSave.data.mainBoxPosition.length > 1)
+			mainBox.setPosition(chartEditorSave.data.mainBoxPosition[0], chartEditorSave.data.mainBoxPosition[1]);
+		if(chartEditorSave.data.infoBoxPosition != null && chartEditorSave.data.infoBoxPosition.length > 1)
+			infoBox.setPosition(chartEditorSave.data.infoBoxPosition[0], chartEditorSave.data.infoBoxPosition[1]);
+
+		upperBox = new PsychUIBox(40, 40, 330, 300, [Language.get('charting_file_text'), Language.get('charting_edit_text'), Language.get('charting_view_text')]);
+		upperBox.scrollFactor.set();
+		upperBox.isMinimized = true;
+		upperBox.minimizeOnFocusLost = true;
+		upperBox.canMove = false;
+		upperBox.cameras = [camUI];
+		upperBox.bg.visible = false;
+		add(upperBox);
+
+		outputTxt = new FlxText(25, FlxG.height - 50, FlxG.width - 50, '', 20);
+		outputTxt.borderSize = 2;
+		outputTxt.borderStyle = OUTLINE_FAST;
+		outputTxt.scrollFactor.set();
+		outputTxt.cameras = [camUI];
+		outputTxt.alpha = 0;
+		add(outputTxt);
+
+		if(PlayState.SONG == null) //Atleast try to avoid crashes
+		{
+			openNewChart();
+		}
+
+		updateJsonData();
+		
+		// TABS
+		////// for main box
+		addChartingTab();
+		addDataTab();
+		addEventsTab();
+		addNoteTab();
+		addSectionTab();
+		addSongTab();
+		
+		////// for upper box
+		addFileTab();
+		addEditTab();
+		addViewTab();
+		//
+
+		loadMusic();
+		reloadNotesDropdowns();
+		if(!_shouldReset)
+		{
+			vocals.time = opponentVocals.time = FlxG.sound.music.time = Conductor.songPosition - Conductor.offset;
+			if(FlxG.sound.music.time >= vocals.length)
+				vocals.pause();
+			if(FlxG.sound.music.time >= opponentVocals.length)
+				opponentVocals.pause();
+		}
+
+		reloadNotes();
+		updateGridVisibility();
+
+		// CHARACTERS FOR THE DROP DOWNS
+		var gameOverCharacters:Array<String> = loadFileList('characters/', 'data/characterList.txt');
+		var characterList:Array<String> = gameOverCharacters.filter((name:String) -> (!name.endsWith('-dead') && !name.endsWith('-death')));
+		playerDropDown.list = characterList;
+		opponentDropDown.list = characterList;
+		girlfriendDropDown.list = characterList;
+
+		gameOverCharacters.insert(0, '');
+		gameOverCharacters.sort(function(a:String, b:String)
+		{
+			if((a == '' || a.endsWith('-dead') || a.endsWith('-death')) && !(b == '' || b.endsWith('-dead') || b.endsWith('-death'))) return -1; //Prioritize "-dead" or "-death" characters
+			return 0;
+		});
+		gameOverCharDropDown.list = gameOverCharacters;
+
+		stageDropDown.list = loadFileList('stages/', 'data/stageList.txt');
+		onChartLoaded();
+
+		var tipText:FlxText = new FlxText(FlxG.width - 210, FlxG.height - 30, 200, (controls.mobileC ? Language.get('charting_forhelptextm') : Language.get('charting_forhelptextpc')), 20);
+		tipText.cameras = [camUI];
+		tipText.setFormat(Paths.font("unifont-16.0.02.otf"), 18, FlxColor.WHITE, RIGHT);
+		tipText.borderColor = FlxColor.BLACK;
+		tipText.scrollFactor.set();
+		tipText.borderSize = 1;
+		tipText.active = false;
+		add(tipText);
+
+		tipBg = new FlxSprite().makeGraphic(1, 1, FlxColor.BLACK);
+		tipBg.cameras = [camUI];
+		tipBg.scale.set(FlxG.width, FlxG.height);
+		tipBg.updateHitbox();
+		tipBg.scrollFactor.set();
+		tipBg.visible = tipBg.active = false;
+		tipBg.alpha = 0.6;
+		add(tipBg);
+		
+		fullTipText = new FlxText(0, 0, FlxG.width - 200);
+		fullTipText.setFormat(Paths.font("unifont-16.0.02.otf"), 24, FlxColor.WHITE, CENTER);
+		fullTipText.cameras = [camUI];
+		fullTipText.scrollFactor.set();
+		fullTipText.visible = fullTipText.active = false;
+		/*fullTipText.text = (controls.mobileC) ? [
+			"Up/Down - Move Conductor's Time",
+			"Left/Right - Change Sections",
+			"Up/Down (On The Right) - Decrease/Increase Note Sustain Length",
+			"Hold Y to Increase/Decrease move by 4x",
+			"",
+			"C - Preview Chart",
+			"A - Playtest Chart",
+			"X - Stop/Resume Song",
+			"",
+			"Hold H and touch to Select Note(s)",
+			"Z - Hide Action TouchPad Buttons",
+			"V/D - Zoom in/out",
+			""
+			#if FLX_PITCH
+			,"G - Reset Song Playback Rate"
+			#end
+		].join('\n') : [
+			"W/S/Mouse Wheel - Move Conductor's Time",
+			"A/D - Change Sections",
+			"Q/E - Decrease/Increase Note Sustain Length",
+			"Hold Shift/Alt to Increase/Decrease move by 4x",
+			"",
+			"F12 - Preview Chart",
+			"Enter - Playtest Chart",
+			"Space - Stop/Resume song",
+			"",
+			"Alt + Click - Select Note(s)",
+			"Shift + Click - Select/Unselect Note(s)",
+			"Right Click - Selection Box",
+			"",
+			"R - Reset Section",
+			"Shift + R - Go Back to the Start of the Song",
+			"Z/X - Zoom in/out",
+			"Left/Right - Change Snap",
+			#if FLX_PITCH
+			"Left Bracket / Right Bracket - Change Song Playback Rate", "ALT + Left Bracket / Right Bracket - Reset Song Playback Rate",
+			#end
+			"",
+			"Ctrl + Z - Undo",
+			"Ctrl + Y - Redo",
+			"Ctrl + X - Cut Selected Notes",
+			"Ctrl + C - Copy Selected Notes",
+			"Ctrl + V - Paste Copied Notes",
+			"Ctrl + A - Select all in current Section",
+			"Ctrl + S - Quicksave",
+		].join('\n');*/
+		fullTipText.text = (controls.mobileC) 
+    		? Language.get("charting_mobile_tips").split('\n').join('\n') 
+    		: Language.get("charting_desktop_tips").split('\n').join('\n');
+		fullTipText.screenCenter();
+		add(fullTipText);
+	addTouchPad('LEFT_FULL', 'CHART_EDITOR');
+	super.create();
+
+	// 初始化角色显示
+	if(chartEditorSave.data.showCharacters == null) chartEditorSave.data.showCharacters = false;
+	if(chartEditorSave.data.showCharacters) initCharacters();
+	}
+
+	function initCharacters()
+	{
+		var stageData = StageData.dummy();
+
+		// 创建对手角色（左侧）
+		if(dad != null) remove(dad);
+		dad = new Character(stageData.opponent[0], stageData.opponent[1], PlayState.SONG.player2);
+		dad.cameras = [camChart];
+		dad.updateHitbox();
+		dad.visible = showCharactersCheckBox != null ? chartEditorSave.data.showCharacters : false;
+		
+		// 自定义对手角色位置（覆盖StageData，不影响全局）
+		dad.x = -700;
+		dad.y = 200;
+
+		add(dad);
+
+		// 定义dad的拖动范围
+		dadDragRange = {minX: -1200, maxX: -200, minY: 50, maxY: 300};
+
+		// 创建玩家角色（右侧）
+		if(boyfriend != null) remove(boyfriend);
+		boyfriend = new Character(stageData.boyfriend[0], stageData.boyfriend[1], PlayState.SONG.player1, true);
+		boyfriend.cameras = [camChart];
+		boyfriend.updateHitbox();
+		boyfriend.visible = showCharactersCheckBox != null ? chartEditorSave.data.showCharacters : false;
+		
+		// 自定义玩家角色位置（覆盖StageData，不影响全局）
+		boyfriend.x = 1200;
+		boyfriend.y = 200;
+
+		add(boyfriend);
+
+		// 定义boyfriend的拖动范围
+		boyfriendDragRange = {minX: 900, maxX: 1800, minY: 50, maxY: 300};
+
+		charactersLoaded = true;
+		
+		// 设置相机缩放以获得更好的视觉效果
+		camChart.zoom = 0.4;
+	}
+
+	function updateCharacters()
+	{
+		if(!charactersLoaded) return;
+
+		var stageData = StageData.dummy();
+
+		// 更新对手角色
+		if(dad != null && dad.curCharacter != PlayState.SONG.player2)
+		{
+			remove(dad);
+			dad = new Character(stageData.opponent[0], stageData.opponent[1], PlayState.SONG.player2);
+			dad.cameras = [camChart];
+			dad.updateHitbox();
+			dad.visible = showCharactersCheckBox.checked;
+			
+			// 自定义对手角色位置（覆盖StageData，不影响全局）
+			dad.x = -850;
+			dad.y = 100;
+
+			add(dad);
+
+			// 定义dad的拖动范围
+			dadDragRange = {minX: -1200, maxX: -200, minY: 50, maxY: 300};
+		}
+
+		// 更新玩家角色
+		if(boyfriend != null && boyfriend.curCharacter != PlayState.SONG.player1)
+		{
+			remove(boyfriend);
+			boyfriend = new Character(stageData.boyfriend[0], stageData.boyfriend[1], PlayState.SONG.player1, true);
+			boyfriend.cameras = [camChart];
+			boyfriend.updateHitbox();
+			boyfriend.visible = showCharactersCheckBox.checked;
+			
+			// 自定义玩家角色位置（覆盖StageData，不影响全局）
+			boyfriend.x = 1500;
+			boyfriend.y = 100;
+
+			add(boyfriend);
+
+			// 定义boyfriend的拖动范围
+			boyfriendDragRange = {minX: 900, maxX: 1800, minY: 50, maxY: 300};
+		}
+	}
+
+	function drawCharacterDragRange(char:Character, spriteGroup:FlxSpriteGroup, color:FlxColor):Void
+	{
+		if (char == null || !char.visible || !char.isOnScreen(camChart))
+		{
+			// 隐藏所有拖动范围sprite
+			for (spr in spriteGroup.members)
+				spr.visible = false;
+			return;
+		}
+
+		@:privateAccess
+		var lineSize:Int = Std.int(Math.max(2, Math.floor(2 / camChart.zoom)));
+
+		// 以角色当前位置为中心，绘制固定大小的参考框（200x200像素）
+		var refBoxSize:Float = 200;
+		var rangeMinX:Float = char.x - refBoxSize / 2;
+		var rangeMaxX:Float = char.x + refBoxSize / 2;
+		var rangeMinY:Float = char.y - refBoxSize / 2;
+		var rangeMaxY:Float = char.y + refBoxSize / 2;
+
+		var rangeWidth:Float = rangeMaxX - rangeMinX;
+		var rangeHeight:Float = rangeMaxY - rangeMinY;
+
+		// 确保有4个sprite可用（4个边框）
+		while(spriteGroup.members.length < 4)
+		{
+			var spr:FlxSprite = new FlxSprite().makeGraphic(1, 1, color);
+			spr.alpha = 0.5;
+			spr.cameras = [camChart];
+			spriteGroup.add(spr);
+		}
+
+		for (num => sel in spriteGroup.members)
+		{
+			sel.x = rangeMinX;
+			sel.y = rangeMinY;
+			sel.cameras = [camChart];
+			switch(num)
+			{
+				case 0: //Top
+					sel.setGraphicSize(Std.int(rangeWidth), lineSize);
+				case 1: //Bottom
+					sel.setGraphicSize(Std.int(rangeWidth), lineSize);
+					sel.y += rangeHeight - lineSize;
+				case 2: //Left
+					sel.setGraphicSize(lineSize, Std.int(rangeHeight));
+				case 3: //Right
+					sel.setGraphicSize(lineSize, Std.int(rangeHeight));
+					sel.x += rangeWidth - lineSize;
+			}
+			sel.updateHitbox();
+			sel.scrollFactor.set(char.scrollFactor.x, char.scrollFactor.y);
+			sel.visible = true;
+		}
+	}
+
+	// 播放角色的sing动画
+	public function playCharacterSing(char:Character, noteData:Int, ?forcePlay:Bool = false):Void
+	{
+		if(char == null || !char.visible) return;
+
+		var animToPlay:String = singAnimations[Std.int(Math.abs(Math.min(singAnimations.length-1, noteData)))];
+		if(char.animation.exists(animToPlay))
+		{
+			char.playAnim(animToPlay, true);
+			char.holdTimer = 0;
+		}
+	}
+
+	// 处理idle动画的播放
+	// 每拍都检查，使用holdTimer和singDuration来决定何时从sing回到idle
+	// 必须在sing Duration完成后的下一拍才播放idle
+	// 返回类型：Null<Int> - 返回sing完成的beat，或null表示idle已播放
+	private function handleIdleAnimationLoop(char:Character, currentBeat:Int, needIdleReplay:Bool, ?singFinishedBeat:Null<Int>):Null<Int>
+	{
+		if(char == null || !char.visible) return singFinishedBeat;
+
+		var animName:String = char.getAnimationName();
+
+		// 检查是否在播放sing动画
+		if(animName.startsWith('sing'))
+		{
+			// 制谱器模式下：总是允许角色回到idle动画
+			// keepSingAnimation只在实际游戏中针对按键持续按下使用
+			var timeThreshold:Float = Conductor.stepCrochet * (0.0011 #if FLX_PITCH / FlxG.sound.music.pitch #end) * char.singDuration;
+			if(char.holdTimer > timeThreshold)
+			{
+				// holdTimer超过阈值，记录当前beat为sing完成的beat
+				return currentBeat; // 返回当前beat，标记sing在此beat完成
+			}
+			// 还在保持sing动画，不播放idle
+			return singFinishedBeat; // 保持之前的sing完成记录
+		}
+
+		// 当前不在sing动画中，检查是否需要在下一拍播放idle
+		if(singFinishedBeat != null && currentBeat > singFinishedBeat)
+		{
+			// sing已完成，且是下一拍，播放idle/dance动画
+			char.dance();
+			return null; // idle已播放，清除sing完成标记
+		}
+
+		// 每拍都尝试播放idle动画（正常idle循环）
+		if(currentBeat != lastBeat)
+		{
+			// 播放idle/dance动画
+			char.dance();
+			return singFinishedBeat; // 保持sing完成记录（如果存在）
+		}
+
+		return singFinishedBeat;
+	}
+
+	// 更新角色的holdTimer和动画状态（用于EditorPlayState中手动更新角色）
+	public function updateCharacter(elapsed:Float):Void
+	{
+		// 临时保存原来的keepSingAnimation值
+		var originalKeepSingAnimation:Bool = ClientPrefs.data.keepSingAnimation;
+		// 在制谱器中临时禁用keepSingAnimation，让角色正常回到idle
+		ClientPrefs.data.keepSingAnimation = false;
+		
+		if(dad != null && dad.visible) dad.update(elapsed);
+		if(boyfriend != null && boyfriend.visible) boyfriend.update(elapsed);
+		
+		// 恢复原来的keepSingAnimation值
+		ClientPrefs.data.keepSingAnimation = originalKeepSingAnimation;
+	}
+
+	// 获取角色的动画偏移（用于显示和调试）
+	public function getCharacterOffset(char:Character, animName:String):{x:Float, y:Float}
+	{
+		if(char == null || !char.animOffsets.exists(animName)) return {x: 0, y: 0};
+		var offset:Array<Dynamic> = char.animOffsets.get(animName);
+		return {x: offset[0], y: offset[1]};
+	}
+
+	var gridColors:Array<FlxColor>;
+	var gridColorsOther:Array<FlxColor>;
+	function changeTheme(changeTo:ChartingTheme, ?doSave:Bool = true)
+	{
+		var oldTheme:ChartingTheme = theme;
+		theme = changeTo;
+		chartEditorSave.data.theme = changeTo;
+		if(doSave) chartEditorSave.flush();
+
+		switch(theme)
+		{
+			case LIGHT:
+				bg.color = 0xFFA0A0A0;
+				gridColors = [0xFFDFDFDF, 0xFFBFBFBF];
+				gridColorsOther = [0xFF5F5F5F, 0xFF4A4A4A];
+			case DARK:
+				bg.color = 0xFF222222;
+				gridColors = [0xFF3F3F3F, 0xFF2F2F2F];
+				gridColorsOther = [0xFF1F1F1F, 0xFF111111];
+			case VSLICE:
+				bg.color = 0xFF673AB7;
+				gridColors = [0xFFD0D0D0, 0xFFAFAFAF];
+				gridColorsOther = [0xFF595959, 0xFF464646];
+			case CUSTOM:
+				bg.color = CoolUtil.colorFromString(chartEditorSave.data.customBgColor);
+				gridColors = [CoolUtil.colorFromString(chartEditorSave.data.customGridColors[0]), CoolUtil.colorFromString(chartEditorSave.data.customGridColors[1])];
+				gridColorsOther = [CoolUtil.colorFromString(chartEditorSave.data.customNextGridColors[0]), CoolUtil.colorFromString(chartEditorSave.data.customNextGridColors[1])];
+			default:
+				bg.color = 0xFF303030;
+				gridColors = [0xFFDFDFDF, 0xFFBFBFBF];
+				gridColorsOther = [0xFF5F5F5F, 0xFF4A4A4A];
+		}
+
+		if(theme != oldTheme || theme == CUSTOM)
+		{
+			if(opponentGridBg != null)
+			{
+				opponentGridBg.loadGrid(gridColors[0], gridColors[1]);
+				opponentGridBg.vortexLineEnabled = vortexEnabled;
+				opponentGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+				prevOpponentGridBg.loadGrid(gridColorsOther[0], gridColorsOther[1]);
+				prevOpponentGridBg.vortexLineEnabled = vortexEnabled;
+				prevOpponentGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+				nextOpponentGridBg.loadGrid(gridColorsOther[0], gridColorsOther[1]);
+				nextOpponentGridBg.vortexLineEnabled = vortexEnabled;
+				nextOpponentGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+			}
+			if(SHOW_EVENT_COLUMN && eventGridBg != null)
+			{
+				eventGridBg.loadGrid(gridColors[0], gridColors[1]);
+				eventGridBg.vortexLineEnabled = vortexEnabled;
+				eventGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+				prevEventGridBg.loadGrid(gridColorsOther[0], gridColorsOther[1]);
+				prevEventGridBg.vortexLineEnabled = vortexEnabled;
+				prevEventGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+				nextEventGridBg.loadGrid(gridColorsOther[0], gridColorsOther[1]);
+				nextEventGridBg.vortexLineEnabled = vortexEnabled;
+				nextEventGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+			}
+			if(playerGridBg != null)
+			{
+				playerGridBg.loadGrid(gridColors[0], gridColors[1]);
+				playerGridBg.vortexLineEnabled = vortexEnabled;
+				playerGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+				prevPlayerGridBg.loadGrid(gridColorsOther[0], gridColorsOther[1]);
+				prevPlayerGridBg.vortexLineEnabled = vortexEnabled;
+				prevPlayerGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+				nextPlayerGridBg.loadGrid(gridColorsOther[0], gridColorsOther[1]);
+				nextPlayerGridBg.vortexLineEnabled = vortexEnabled;
+				nextPlayerGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+			}
+		}
+	}
+
+	function openNewChart()
+	{
+		var song:SwagSong = {
+			song: 'Test',
+			notes: [],
+			events: [],
+			bpm: 150,
+			needsVoices: true,
+			speed: 1,
+			offset: 0,
+
+			player1: 'bf',
+			player2: 'dad',
+			gfVersion: 'gf',
+			stage: 'stage',
+			specialInst: "", // 添加默认值
+    		specialVocal: "", // 添加默认值
+			format: 'psych_v1'
+		};
+		Song.chartPath = null;
+		loadChart(song);
+	}
+
+	function prepareReload()
+	{
+		updateJsonData();
+		loadMusic();
+		reloadNotes();
+		onChartLoaded();
+		updateHeads(true);
+		
+		autoSaveTime = 0;
+		Conductor.songPosition = 0;
+		if(FlxG.sound.music != null) FlxG.sound.music.time = 0;
+		curSec = 0;
+		loadSection();
+		forceDataUpdate = true;
+	}
+
+	function onChartLoaded()
+	{
+		if(PlayState.SONG == null) return;
+
+		// SONG TAB
+		songNameInputText.text = PlayState.SONG.song;
+		allowVocalsCheckBox.checked = (PlayState.SONG.needsVoices != false); //If the song for some reason does not have this value, it will be set to true
+
+		bpmStepper.value = PlayState.SONG.bpm;
+		scrollSpeedStepper.value = PlayState.SONG.speed;
+		audioOffsetStepper.value = Reflect.hasField(PlayState.SONG, 'offset') ? PlayState.SONG.offset : 0;
+		Conductor.offset = audioOffsetStepper.value;
+
+		specialInstInputText.text = PlayState.SONG.specialInst != null ? PlayState.SONG.specialInst : '';
+		specialVocalInputText.text = PlayState.SONG.specialVocal != null ? PlayState.SONG.specialVocal : '';
+
+		playerDropDown.selectedLabel = PlayState.SONG.player1;
+		opponentDropDown.selectedLabel = PlayState.SONG.player2;
+		girlfriendDropDown.selectedLabel = PlayState.SONG.gfVersion;
+		stageDropDown.selectedLabel = PlayState.SONG.stage;
+		StageData.loadDirectory(PlayState.SONG);
+
+		// DATA TAB
+		gameOverCharDropDown.selectedLabel = PlayState.SONG.gameOverChar;
+		gameOverSndInputText.text = PlayState.SONG.gameOverSound;
+		gameOverLoopInputText.text = PlayState.SONG.gameOverLoop;
+		gameOverRetryInputText.text = PlayState.SONG.gameOverEnd;
+
+		noRGBCheckBox.checked = (PlayState.SONG.disableNoteRGB == true);
+
+		noteTextureInputText.text = PlayState.SONG.arrowSkin;
+		noteSplashesInputText.text = PlayState.SONG.splashSkin;
+	}
+	
+	var noteSelectionSine:Float = 0;
+	var selectedNotes:Array<MetaNote> = [];
+	var ignoreClickForThisFrame:Bool = false;
+	var outputAlpha:Float = 0;
+	var songFinished:Bool = false;
+
+	var fileDialog:FileDialogHandler = new FileDialogHandler();
+	var lastFocus:PsychUIInputText;
+
+	var autoSaveTime:Float = 0;
+	var autoSaveCap:Int = 2; //in minutes
+	var backupLimit:Int = 10;
+
+	var lastBeatHit:Int = 0;
+	var songBeatNoOffset:Int = 0; // 不受noteOffset影响的纯粹歌曲节拍
+	override function update(elapsed:Float)
+	{
+		if(!fileDialog.completed)
+		{
+			lastFocus = PsychUIInputText.focusOn;
+			return;
+		}
+
+		for (num => key in keysArray)
+			_keysPressedBuffer[num] = FlxG.keys.checkStatus(key, JUST_PRESSED);
+
+		if(autoSaveCap > 0)
+		{
+			autoSaveTime += elapsed / 60.0;
+			//trace(autoSaveTime);
+			//#if debug if(FlxG.keys.justPressed.J) autoSaveTime += 20/60.0; #end
+			if(autoSaveTime >= autoSaveCap #if debug || FlxG.keys.justPressed.NUMPADMULTIPLY #end)
+			{
+				FlxTween.cancelTweensOf(autoSaveIcon);
+				autoSaveTime = 0;
+				autoSaveIcon.alpha = 0;
+				updateChartData();
+				var chartName:String = 'unknown';
+				if(Song.chartPath != null)
+				{
+					chartName = Song.chartPath.replace('\\', '/');
+					chartName = chartName.substring(chartName.lastIndexOf('/')+1, chartName.lastIndexOf('.'));
+				}
+				chartName += DateTools.format(Date.now(), '_%Y-%m-%d_%H-%M-%S');
+				var songCopy:SwagSong = Reflect.copy(PlayState.SONG);
+				Reflect.setField(songCopy, '__original_path', Song.chartPath);
+				var dataToSave:String = haxe.Json.stringify(songCopy);
+				//trace(chartName, dataToSave);
+				if(!FileSystem.isDirectory('backups')) FileSystem.createDirectory('backups');
+				File.saveContent('backups/$chartName.$BACKUP_EXT', dataToSave);
+
+				if(backupLimit > 0)
+				{
+					var files:Array<String> = Paths.readDirectory('backups/').filter((file:String) -> file.endsWith('.$BACKUP_EXT'));
+					if(files.length > backupLimit)
+					{
+						var incorrect:Array<String> = [];
+						var map:Map<String, Float> = [];
+						for(file in files)
+						{
+							var split:Array<String> = file.split('_');
+							if(split.length > 2) //is properly formatted
+							{
+								try
+								{
+									var timeStr:String = split[split.length-1].replace('-', ':');
+									timeStr = timeStr.substr(0, timeStr.indexOf('.'));
+
+									var fileJoin:String = split[split.length-2] + ' ' + timeStr;
+									var date:Date = Date.fromString(fileJoin);
+									//trace(fileJoin, date.getTime());
+									map.set(file, date.getTime());
+								}
+								catch(e:Exception)
+								{
+									incorrect.push(file);
+								}
+							}
+							else incorrect.push(file);
+						}
+
+						if(incorrect.length > 0) files = files.filter((file:String) -> !incorrect.contains(file));
+						files.sort(function(a:String, b:String) return map.get(a) > map.get(b) ? 1 : -1);
+
+						while(files.length > backupLimit)
+						{
+							var file = files.shift();
+							//trace('removed $file');
+							try
+							{
+								FileSystem.deleteFile('backups/$file');
+							}
+							catch(e:Exception) {}
+						}
+					}
+				}
+
+				FlxTween.tween(autoSaveIcon, {alpha: 1}, 0.5, {onComplete: function(_)
+					FlxTween.tween(autoSaveIcon, {alpha: 0}, 0.5, {startDelay: 2})
+				});
+			}
+		}
+
+		ClientPrefs.toggleVolumeKeys(PsychUIInputText.focusOn == null);
+
+		var lastTime:Float = Conductor.songPosition;
+		outputAlpha = Math.max(0, outputAlpha - elapsed);
+		var holdingAlt:Bool = touchPad.buttonG.justPressed || FlxG.keys.pressed.ALT;
+		if(FlxG.sound.music != null)
+		{
+			if(PsychUIInputText.focusOn == null) //If not typing anything
+			{
+				if(touchPad.buttonC.justPressed || FlxG.keys.justPressed.F12)
+				{
+					// 临时禁用 keepSingAnimation，使角色在制谱器中正常回到 idle
+					var originalKeepSingAnimation:Bool = ClientPrefs.data.keepSingAnimation;
+					ClientPrefs.data.keepSingAnimation = false;
+					
+					super.update(elapsed);
+					
+					// 恢复原值
+					ClientPrefs.data.keepSingAnimation = originalKeepSingAnimation;
+					
+					openEditorPlayState();
+					lastFocus = PsychUIInputText.focusOn;
+					return;
+				}
+				else if(touchPad.buttonF.justPressed || FlxG.keys.justPressed.F1)
+				{
+					if (controls.mobileC)
+					{
+						touchPad.forEachAlive(function(button:TouchButton){
+							if(button.tag != 'F')
+								button.visible = !button.visible;
+						});
+					}
+					var vis:Bool = !fullTipText.visible;
+					tipBg.visible = tipBg.active = fullTipText.visible = fullTipText.active = vis;
+				}
+
+				if (touchPad.buttonZ.justPressed)
+				{
+					if (controls.mobileC)
+					{
+						touchPad.forEachAlive(function(button:TouchButton){
+							if(button.tag != 'Z' && button.tag != 'LEFT' && button.tag != 'RIGHT' && button.tag != 'UP' && button.tag != 'DOWN')
+								touchPad.buttonUp2.visible = touchPad.buttonDown2.visible = button.visible = !button.visible;
+						});
+					}
+				}
+
+				if (touchPad.buttonG.justPressed)
+				{
+					if(playbackRate != 1)
+					{
+						playbackRate = 1;
+						setPitch();
+					}
+					playbackSlider.value = playbackRate;
+				}
+
+				var goingBack:Bool = false;
+				if(FlxG.keys.pressed.RBRACKET || (FlxG.keys.pressed.LBRACKET && (goingBack = true)))
+				{
+					if(holdingAlt)
+					{
+						if(playbackRate != 1)
+						{
+							playbackRate = 1;
+							setPitch();
+						}
+					}
+					else
+					{
+						playbackRate = FlxMath.bound(playbackRate + elapsed * (!goingBack ? 1 : -1), playbackSlider.min, playbackSlider.max);
+						setPitch();
+					}
+					playbackSlider.value = playbackRate;
+				}
+
+				if(vortexEnabled && _keysPressedBuffer.contains(true))
+				{
+					var typeSelected:String = noteTypes[noteTypeDropDown.selectedIndex];
+					if(typeSelected != null)
+					{
+						typeSelected = typeSelected.trim();
+						if(typeSelected.length < 1) typeSelected = null;
+					}
+
+					var sectionStart:Float = cachedSectionTimes[curSec];
+					var strumTime:Float = Conductor.songPosition - sectionStart;
+					strumTime -= strumTime % (Conductor.stepCrochet * 16 / curQuant);
+					strumTime += sectionStart;
+
+					trace('Vortex editor press at time: $strumTime');
+					var deletedNotes:Array<MetaNote> = [];
+					var addedNotes:Array<MetaNote> = [];
+					for (num => press in _keysPressedBuffer)
+					{
+						if(!press) continue;
+
+						// Try to find a note to delete first
+						var didDelete:Bool = false;
+						for (note in curRenderedNotes)
+						{
+							if(note == null || note.isEvent) continue;
+
+							if(note.songData[1] == num && Math.abs(strumTime - note.strumTime) < 1)
+							{
+								deletedNotes.push(note);
+								didDelete = true;
+								break;
+							}
+						}
+
+						if(didDelete) continue;
+
+						// If no notes were found, add a new in its place
+						var didAdd:Bool = false;
+						var noteSetupData:Array<Dynamic> = [strumTime, num, 0];
+						if(typeSelected != null) noteSetupData.push(typeSelected);
+	
+						var noteAdded:MetaNote = createNote(noteSetupData);
+						for (num in sectionFirstNoteID...notes.length)
+						{
+							var note = notes[num];
+							if(note.strumTime >= strumTime)
+							{
+								notes.insert(num, noteAdded);
+								didAdd = true;
+								break;
+							}
+						}
+						if(!didAdd) notes.push(noteAdded);
+						addedNotes.push(noteAdded);
+					}
+
+					if(deletedNotes.length > 0)
+					{
+						var wasSelected:Bool = false;
+						for (note in deletedNotes)
+						{
+							if(selectedNotes.contains(note))
+							{
+								selectedNotes.remove(note);
+								wasSelected = true;
+							}
+							notes.remove(note);
+						}
+						if(wasSelected) onSelectNote();
+						addUndoAction(DELETE_NOTE, {notes: deletedNotes});
+					}
+					if(addedNotes.length > 0)
+						addUndoAction(ADD_NOTE, {notes: addedNotes});
+
+					softReloadNotes(true);
+				}
+				else if(touchPad.buttonLeft.justPressed || FlxG.keys.justPressed.A != touchPad.buttonRight.justPressed || FlxG.keys.justPressed.D && !holdingAlt)
+				{
+					if(FlxG.sound.music.playing)
+						setSongPlaying(false);
+
+					var shiftAdd:Int = (touchPad.buttonY.pressed || FlxG.keys.pressed.SHIFT ? 4 : 1);
+
+					if(touchPad.buttonLeft.justPressed || FlxG.keys.justPressed.A)
+					{
+						if(curSec - shiftAdd < 0) shiftAdd = curSec;
+
+						if(shiftAdd > 0)
+						{
+							loadSection(curSec - shiftAdd);
+							Conductor.songPosition = FlxG.sound.music.time = cachedSectionTimes[curSec] - Conductor.offset + 0.000001;
+						}
+					}
+					else if(touchPad.buttonRight.justPressed || FlxG.keys.justPressed.D)
+					{
+						if(curSec + shiftAdd >= PlayState.SONG.notes.length) shiftAdd = PlayState.SONG.notes.length - curSec - 1;
+						
+						if(shiftAdd > 0)
+						{
+							loadSection(curSec + shiftAdd);
+							Conductor.songPosition = FlxG.sound.music.time = cachedSectionTimes[curSec] - Conductor.offset + 0.000001;
+						}
+					}
+				}
+				else if(FlxG.keys.justPressed.HOME)
+				{
+					setSongPlaying(false);
+					Conductor.songPosition = FlxG.sound.music.time = 0;
+					loadSection(0);
+				}
+				else if(FlxG.keys.justPressed.END)
+				{
+					setSongPlaying(false);
+					Conductor.songPosition = FlxG.sound.music.time = FlxG.sound.music.length - 1;
+					loadSection(PlayState.SONG.notes.length - 1);
+				}
+				else if(FlxG.keys.justPressed.R)
+				{
+					var timeToGoBack:Float = 0;
+					if(!FlxG.keys.pressed.SHIFT) timeToGoBack = cachedSectionTimes[curSec] + (curSec > 0 ? 0.000001 : 0);
+					else loadSection(0);
+					Conductor.songPosition = FlxG.sound.music.time = vocals.time = opponentVocals.time = timeToGoBack;
+				}
+				else if(touchPad.buttonUp.pressed || FlxG.keys.pressed.W != touchPad.buttonDown.pressed || FlxG.keys.pressed.S || FlxG.mouse.wheel != 0)
+				{
+					if(FlxG.sound.music.playing)
+						setSongPlaying(false);
+
+					if(mouseSnapCheckBox.checked && FlxG.mouse.wheel != 0)
+					{
+						var snap:Float = Conductor.stepCrochet / (curQuant/16) / curZoom;
+						var timeAdd:Float = (touchPad.buttonY.pressed || FlxG.keys.pressed.SHIFT ? 4 : 1) / (holdingAlt ? 4 : 1) * -FlxG.mouse.wheel * snap;
+						var time:Float = Math.round((FlxG.sound.music.time + timeAdd) / snap) * snap;
+						if(time > 0) time += 0.000001; //goes at the start of a section more properly
+						FlxG.sound.music.time = time;
+					}
+					else
+					{
+						var speedMult:Float = (touchPad.buttonY.pressed || FlxG.keys.pressed.SHIFT ? 4 : 1) * (FlxG.mouse.wheel != 0 ? 4 : 1) / (holdingAlt ? 4 : 1);
+						if(touchPad.buttonUp.pressed || FlxG.keys.pressed.W || FlxG.mouse.wheel > 0)
+							FlxG.sound.music.time -= Conductor.crochet * speedMult * 1.5 * elapsed / curZoom;
+						else if(touchPad.buttonDown.pressed || FlxG.keys.pressed.S || FlxG.mouse.wheel < 0)
+							FlxG.sound.music.time += Conductor.crochet * speedMult * 1.5 * elapsed / curZoom;
+					}
+
+					FlxG.sound.music.time = FlxMath.bound(FlxG.sound.music.time, 0, FlxG.sound.music.length - 1);
+					if(FlxG.sound.music.playing) setSongPlaying(!FlxG.sound.music.playing);
+				}
+				else if(touchPad.buttonX.justPressed || FlxG.keys.justPressed.SPACE)
+				{
+					setSongPlaying(!FlxG.sound.music.playing);
+				}
+			}
+
+			if(!songFinished) Conductor.songPosition = FlxMath.bound(FlxG.sound.music.time + Conductor.offset, 0, FlxG.sound.music.length - 1);
+			updateScrollY();
+		}
+
+		// 角色拖动逻辑
+		if(dragCharactersCheckBox != null && dragCharactersCheckBox.checked && PsychUIInputText.focusOn == null && !ignoreClickForThisFrame)
+		{
+			// 检测鼠标左键按下
+			if(FlxG.mouse.justPressed)
+			{
+				// 检查是否点击到角色
+				if(dad != null && dad.visible && FlxG.mouse.overlaps(dad, camChart))
+				{
+					isDraggingCharacter = true;
+					draggedCharacter = dad;
+					dragOffsetX = FlxG.mouse.getWorldPosition(camChart).x - dad.x;
+					dragOffsetY = FlxG.mouse.getWorldPosition(camChart).y - dad.y;
+				}
+				else if(boyfriend != null && boyfriend.visible && FlxG.mouse.overlaps(boyfriend, camChart))
+				{
+					isDraggingCharacter = true;
+					draggedCharacter = boyfriend;
+					dragOffsetX = FlxG.mouse.getWorldPosition(camChart).x - boyfriend.x;
+					dragOffsetY = FlxG.mouse.getWorldPosition(camChart).y - boyfriend.y;
+				}
+			}
+
+			// 拖动角色
+			if(isDraggingCharacter && draggedCharacter != null)
+			{
+				var mousePos = FlxG.mouse.getWorldPosition(camChart);
+				var newX = mousePos.x - dragOffsetX;
+				var newY = mousePos.y - dragOffsetY;
+
+				// 移除范围限制，允许自由拖拽角色
+				draggedCharacter.x = newX;
+				draggedCharacter.y = newY;
+			}
+
+			// 检测鼠标释放
+			if(FlxG.mouse.justReleased)
+			{
+				isDraggingCharacter = false;
+				draggedCharacter = null;
+			}
+		}
+
+		// 临时禁用 keepSingAnimation，使角色在制谱器中正常回到 idle
+		var originalKeepSingAnimation:Bool = ClientPrefs.data.keepSingAnimation;
+		ClientPrefs.data.keepSingAnimation = false;
+		
+		super.update(elapsed);
+		
+		// 恢复原值
+		ClientPrefs.data.keepSingAnimation = originalKeepSingAnimation;
+
+		// 绘制角色碰撞箱
+		if(showHitboxCheckBox != null && showHitboxCheckBox.checked)
+		{
+			drawCharacterHitbox(dad, dadHitboxSprites, FlxColor.RED);
+			drawCharacterHitbox(boyfriend, boyfriendHitboxSprites, FlxColor.BLUE);
+		}
+		else
+		{
+			// 隐藏碰撞箱
+			if(dadHitboxSprites != null)
+				for(spr in dadHitboxSprites.members) spr.visible = false;
+			if(boyfriendHitboxSprites != null)
+				for(spr in boyfriendHitboxSprites.members) spr.visible = false;
+		}
+
+		// 绘制角色拖动范围
+		if(showDragRangeCheckBox != null && showDragRangeCheckBox.checked && dragCharactersCheckBox != null && dragCharactersCheckBox.checked)
+		{
+			drawCharacterDragRange(dad, dadDragRangeSprites, 0xFFFF4444);
+			drawCharacterDragRange(boyfriend, boyfriendDragRangeSprites, 0xFF4444FF);
+		}
+		else
+		{
+			// 隐藏拖动范围
+			if(dadDragRangeSprites != null)
+				for(spr in dadDragRangeSprites.members) spr.visible = false;
+			if(boyfriendDragRangeSprites != null)
+				for(spr in boyfriendDragRangeSprites.members) spr.visible = false;
+		}
+
+		if(songFinished)
+		{
+			onSongComplete();
+			lastTime = FlxG.sound.music.time;
+			songFinished = false;
+		}
+		else if(FlxG.sound.music != null)
+		{
+			if(FlxG.sound.music.time >= vocals.length)
+				vocals.pause();
+			if(FlxG.sound.music.time >= opponentVocals.length)
+				opponentVocals.pause();
+
+			while(curSec > 0 && Conductor.songPosition < cachedSectionTimes[curSec])
+				loadSection(curSec - 1);
+			while(curSec < cachedSectionTimes.length - 1 && Conductor.songPosition >= cachedSectionTimes[curSec + 1])
+				loadSection(curSec + 1);
+		}
+
+		if(PsychUIInputText.focusOn == null && lastFocus == null)
+		{
+			var doCut:Bool = false;
+			var canContinue:Bool = true;
+			if(touchPad.buttonA.justPressed || FlxG.keys.justPressed.ENTER)
+			{
+				goToPlayState();
+				return;
+			}
+			else if(FlxG.keys.pressed.CONTROL && !isMovingNotes && (FlxG.keys.justPressed.Z || FlxG.keys.justPressed.Y || FlxG.keys.justPressed.X ||
+				FlxG.keys.justPressed.C || FlxG.keys.justPressed.V || FlxG.keys.justPressed.A || FlxG.keys.justPressed.S))
+			{
+				canContinue = false;
+				if(FlxG.keys.justPressed.Z)
+					undo();
+				else if(FlxG.keys.justPressed.Y)
+					redo();
+				else if((doCut = FlxG.keys.justPressed.X) || FlxG.keys.justPressed.C) // Cut (Ctrl + X) and Copy (Ctrl + C)
+				{
+					if(selectedNotes.length > 0)
+					{
+						copiedNotes = [];
+						copiedEvents = [];
+						var pushedNotes:Array<Array<Dynamic>> = [];
+
+						for (note in selectedNotes)
+						{
+							if(note == null) continue;
+
+							var copied:Array<Dynamic> = makeNoteDataCopy(note.songData, note.isEvent);
+							pushedNotes.push(copied);
+							if(note.isEvent) copiedEvents.push(copied);
+							else copiedNotes.push(copied);
+						}
+						pushedNotes.sort((a:Array<Dynamic>, b:Array<Dynamic>) -> FlxSort.byValues(FlxSort.ASCENDING, a[0], b[0]));
+						
+						var minTime:Float = pushedNotes[0][0];
+						for (note in pushedNotes)
+							note[0] -= minTime;
+					}
+				}
+				else if(FlxG.keys.justPressed.V) // Paste (Ctrl + V)
+				{
+					if(copiedNotes.length > 0 || copiedEvents.length > 0)
+					{
+						selectionBox.visible = false;
+						stopMovingNotes();
+						resetSelectedNotes();
+						selectedNotes = pasteCopiedNotesToSection();
+						selectedNotes.sort(PlayState.sortByTime);
+
+						var didFind:Bool = false;
+						var minNoteData:Float = Math.POSITIVE_INFINITY;
+						for (note in selectedNotes)
+						{
+							if(note == null || note.isEvent) continue;
+
+							if(minNoteData > note.songData[1]) minNoteData = note.songData[1];
+							didFind = true;
+						}
+						if(!didFind) minNoteData = 0;
+						
+						var pushedNotes:Array<MetaNote> = [];
+						var pushedEvents:Array<EventMetaNote> = [];
+						for (note in selectedNotes)
+						{
+							if(note == null) continue;
+
+							if(!note.isEvent)
+							{
+								note.changeNoteData(Std.int(note.songData[1] - minNoteData));
+								pushedNotes.push(note);
+							}
+							else pushedEvents.push(cast (note, EventMetaNote));
+						}
+						addUndoAction(ADD_NOTE, {notes: pushedNotes, events: pushedEvents});
+						moveSelectedNotes(Std.int(minNoteData), selectedNotes[0].y);
+					}
+				}
+				else if(FlxG.keys.justPressed.A) // Select All (Ctrl + A)
+				{
+					var sel = selectedNotes;
+					selectedNotes = curRenderedNotes.members.copy();
+					addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+					onSelectNote();
+					trace('Notes selected: ' + selectedNotes.length);
+				}
+				else if(FlxG.keys.justPressed.S) // Save (Ctrl + S)
+					saveChart();
+			}
+			
+			if(doCut || FlxG.keys.justPressed.DELETE || FlxG.keys.justPressed.BACKSPACE || (isMovingNotes && (FlxG.mouse.justPressedRight || FlxG.keys.justPressed.ESCAPE))) // Delete button
+			{
+				if(selectedNotes.length > 0)
+				{
+					var removedNotes:Array<MetaNote> = [];
+					var removedEvents:Array<EventMetaNote> = [];
+					while(selectedNotes.length > 0)
+					{
+						var note:MetaNote = selectedNotes[0];
+						selectedNotes.shift();
+						if(note == null) continue;
+		
+						var kind:String = !note.isEvent ? 'note' : 'event';
+						trace('Removed $kind at time: ${note.strumTime}');
+						if(!note.isEvent)
+						{
+							notes.remove(note);
+							removedNotes.push(note);
+						}
+						else
+						{
+							var ev:EventMetaNote = cast (note, EventMetaNote);
+							events.remove(ev);
+							removedEvents.push(ev);
+						}
+					}
+					movingNotes.clear();
+					isMovingNotes = false;
+					selectedNotes = [];
+					onSelectNote();
+					softReloadNotes();
+					addUndoAction(DELETE_NOTE, {notes: removedNotes, events: removedEvents});
+				}
+			}
+			else if(canContinue)
+			{
+				if(FlxG.keys.justPressed.LEFT != FlxG.keys.justPressed.RIGHT) //Lower/Higher quant
+				{
+					if(FlxG.keys.justPressed.LEFT)
+						curQuant = quantizations[Std.int(Math.max(quantizations.indexOf(curQuant) - 1, 0))];
+					else
+						curQuant = quantizations[Std.int(Math.min(quantizations.indexOf(curQuant) + 1, quantizations.length - 1))];
+					forceDataUpdate = true;
+				}
+				else if(touchPad.buttonV.justPressed || FlxG.keys.justPressed.Z != touchPad.buttonD.justPressed || FlxG.keys.justPressed.X) //Decrease/Increase Zoom
+				{
+					if(touchPad.buttonV.justPressed || FlxG.keys.justPressed.Z)
+						curZoom = zoomList[Std.int(Math.max(zoomList.indexOf(curZoom) - 1, 0))];
+					else
+						curZoom = zoomList[Std.int(Math.min(zoomList.indexOf(curZoom) + 1, zoomList.length - 1))];
+	
+					notes.sort(PlayState.sortByTime);
+					var noteSec:Int = 0;
+					var nextSectionTime:Float = cachedSectionTimes[noteSec + 1];
+					var curSectionTime:Float = cachedSectionTimes[noteSec];
+					for (num => note in notes)
+					{
+						if(note == null) continue;
+			
+						while(cachedSectionTimes[noteSec + 1] <= note.strumTime)
+						{
+							noteSec++;
+							nextSectionTime = cachedSectionTimes[noteSec + 1];
+							curSectionTime = cachedSectionTimes[noteSec];
+						}
+						positionNoteYOnTime(note, noteSec);
+						note.updateSustainToZoom(cachedSectionCrochets[noteSec] / 4, curZoom);
+					}
+	
+					for (event in events)
+					{
+						var secNum:Int = 0;
+						for (time in cachedSectionTimes)
+						{
+							if(time > event.strumTime) break;
+							secNum++;
+						}
+						positionNoteYOnTime(event, secNum);
+					}
+					loadSection();
+					showOutput('Zoom: ${Math.round(curZoom * 100)}%');
+					updateScrollY();
+				}
+			}
+		}
+
+		if(selectionBox.visible)
+		{
+			if(FlxG.mouse.releasedRight)
+			{
+				var sel = selectedNotes.copy();
+				updateSelectionBox();
+				if(!FlxG.keys.pressed.SHIFT && !holdingAlt)
+					resetSelectedNotes();
+
+				var selectionBounds = selectionBox.getScreenBounds(null, camUI);
+				for (note in curRenderedNotes)
+				{
+					if(note == null) continue;
+
+					if(!selectedNotes.contains(note) || holdingAlt /*&& FlxG.overlap(selectionBox, note)*/) //overlap doesnt work here
+					{
+						var noteBounds = note.getScreenBounds(null, camUI);
+						noteBounds.top -= scrollY;
+						noteBounds.bottom -= scrollY;
+
+						if(selectionBounds.overlaps(noteBounds))
+						{
+							if(holdingAlt && selectedNotes.contains(note))
+							{
+								selectedNotes.remove(note);
+								note.colorTransform.redMultiplier = note.colorTransform.greenMultiplier = note.colorTransform.blueMultiplier = 1;
+								if(note.animation.curAnim != null) note.animation.curAnim.curFrame = 0;
+							}
+							else selectedNotes.push(note);
+							onSelectNote();
+						}
+					}
+				}
+				selectionBox.visible = false;
+				addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+			}
+			else if(FlxG.mouse.justMoved)
+				updateSelectionBox();
+		}
+		else if(FlxG.mouse.pressedRight && (FlxG.mouse.deltaScreenX != 0 || FlxG.mouse.deltaScreenY != 0))
+		{
+			selectionBox.setPosition(FlxG.mouse.screenX, FlxG.mouse.screenY);
+			selectionStart.set(FlxG.mouse.screenX, FlxG.mouse.screenY);
+			selectionBox.visible = true;
+			updateSelectionBox();
+		}
+
+
+
+
+		var gridLayout = getGridLayout();
+		var minX:Float = gridLayout.startX;
+		// 新布局：Event在中间（UI列4-7），不改变minX逻辑
+		if(SHOW_EVENT_COLUMN && lockedEvents) minX = gridLayout.startX;
+
+		if (controls.mobileC)
+		{
+			for (touch in FlxG.touches.list)
+			{
+				if(touch.justPressed && (touch.overlaps(mainBox.bg) || touch.overlaps(infoBox.bg)))
+					ignoreClickForThisFrame = true;
+
+				if(isMovingNotes && touch.justReleased)
+					stopMovingNotes();
+
+			var trackInfo = getTrackAtPosition(touch.x, touch.y);
+			if(trackInfo != null)
+			{
+					var diffX:Float = touch.x - trackInfo.trackX;
+					var diffY:Float = touch.y - trackInfo.grid.y;
+					if(!touchPad.buttonY.pressed)
+						diffY -= diffY % (GRID_SIZE / (curQuant/16));
+
+					if(trackInfo.nextGrid.visible) diffY = Math.min(diffY, trackInfo.grid.height + trackInfo.nextGrid.height);
+					else diffY = Math.min(diffY, trackInfo.grid.height);
+
+					if(trackInfo.prevGrid.visible) diffY = Math.max(diffY, -trackInfo.prevGrid.height);
+					else diffY = Math.max(diffY, 0);
+
+					// 根据UI列计算noteData（新布局：对手(0-3) → Event(4-7) → 玩家(8-11)）
+					var uiColumn:Int = Math.floor(diffX / GRID_SIZE);
+
+					// 根据轨道类型调整UI列偏移
+					if(trackInfo.trackType == 'event') uiColumn += GRID_COLUMNS_PER_PLAYER;
+					else if(trackInfo.trackType == 'player') uiColumn += GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT;
+
+					var noteData:Int = uiColumnToNoteData(uiColumn);
+					dummyArrow.visible = !selectionBox.visible;
+
+					// 计算最终的UI列并应用间距偏移
+					var finalUIColumn:Int = noteDataToUIColumn(noteData);
+					var spacingOffset:Float = 0;
+					if (finalUIColumn >= GRID_COLUMNS_PER_PLAYER)
+					{
+						spacingOffset += TRACK_SPACING; // Event轨道后的间距
+					}
+					if (finalUIColumn >= GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT)
+					{
+						spacingOffset += TRACK_SPACING; // 玩家轨道前的间距
+					}
+					
+					// 如果是Event轨道，根据用户实际点击的具体Event轨道位置调整dummyArrow
+					if (trackInfo.trackType == 'event')
+					{
+						var eventTrackOffset:Int = Math.floor(diffX / GRID_SIZE);
+						dummyArrow.x = gridLayout.eventX + eventTrackOffset * GRID_SIZE;
+					}
+					else
+					{
+						dummyArrow.x = gridLayout.startX + finalUIColumn * GRID_SIZE + spacingOffset;
+					}
+
+					if(touchPad.buttonY.pressed || touch.y >= trackInfo.grid.y || !trackInfo.prevGrid.visible)
+						dummyArrow.y = trackInfo.grid.y + diffY;
+					else
+					{
+						var t:Float = (diffY - (GRID_SIZE / (curQuant/16)));
+						if(touch.y >= trackInfo.grid.y) t *= curZoom;
+						dummyArrow.y = trackInfo.grid.y + t;
+					}
+
+					if(isMovingNotes)
+					{
+						// Move note data
+						var nData:Int = Std.int(Math.max(0, noteData));
+						if(movingNotesLastData != nData)
+						{
+							var isFirst:Bool = true;
+							var movingNotesMinData:Int = 0;
+							var movingNotesMaxData:Int = 0;
+							for (note in selectedNotes) //Find boundaries first
+							{
+								if(note == null || note.isEvent) continue;
+			
+								var data:Int = note.songData[1];
+								if(isFirst || data < movingNotesMinData) movingNotesMinData = data;
+								if(data > movingNotesMaxData) movingNotesMaxData = data;
+								isFirst = false;
+							}
+		
+							var diff:Int = nData - movingNotesLastData;
+							var maxn:Int = (GRID_PLAYERS * GRID_COLUMNS_PER_PLAYER) - 1;
+							movingNotesMinData += diff;
+							movingNotesMaxData += diff;
+							if(movingNotesMinData < 0)
+								diff -= movingNotesMinData;
+							else if(movingNotesMaxData > maxn)
+								diff -= movingNotesMaxData - maxn;
+		
+							for (note in movingNotes)
+							{
+								if(note == null || note.isEvent) continue; //Events shouldn't change note data as they don't have one
+		
+								note.changeNoteData(note.songData[1] + diff);
+								positionNoteXByData(note);
+							}
+						}
+						movingNotesLastData = nData;
+		
+						// Move note strum time
+						if(dummyArrow.y != movingNotesLastY)
+						{
+							var diff:Float = dummyArrow.y - movingNotesLastY;
+							var curSecRow:Int = 0;
+							for (note in movingNotes) //Try to figure out new strum time for the notes, DEFINITELY INACCURATE WITH BPM CHANGING, ALTHOUGH UNTESTED
+							{
+								if(note == null) continue;
+		
+								note.chartY += diff;
+								var row:Float = (note.chartY / GRID_SIZE) * curZoom;
+								while(curSecRow + 1 < cachedSectionRow.length && cachedSectionRow[curSecRow] <= row)
+								{
+									curSecRow++;
+								}
+		
+								note.setStrumTime(Math.max(-5000, note.strumTime + (diff * cachedSectionCrochets[curSecRow] / 4) / GRID_SIZE * curZoom));
+								positionNoteYOnTime(note, curSecRow);
+								if(note.isEvent) cast (note, EventMetaNote).updateEventText();
+							}
+							movingNotesLastY = dummyArrow.y;
+						}
+					}
+					else if(touch.justPressed && !ignoreClickForThisFrame)
+					{
+						if(FlxG.keys.pressed.CONTROL && touch.justPressed)
+						{
+							if(selectedNotes.length > 0)
+								moveSelectedNotes(noteData, dummyArrow.y);
+							else
+								showOutput('You must select notes to move them!', true);
+						}
+						else if(touch.x >= gridLayout.startX && touch.x < gridLayout.startX + gridLayout.totalWidth)
+						{
+							var closeNotes:Array<MetaNote> = curRenderedNotes.members.filter(function(note:MetaNote)
+							{
+								var chartY:Float = touch.y - note.chartY;
+								if(note.isEvent && noteData < 0)
+								{
+									var eventDiffX:Float = touch.x - trackInfo.trackX;
+									var clickTrackIndex:Int = Std.int(Math.floor(eventDiffX / GRID_SIZE));
+									clickTrackIndex = Std.int(Math.max(0, Math.min(clickTrackIndex, EVENT_TRACK_COUNT - 1)));
+									var eventNote:EventMetaNote = cast note;
+									return eventNote.eventTrackIndex == clickTrackIndex && chartY >= 0 && chartY < GRID_SIZE;
+								}
+								return (!note.isEvent && note.songData[1] == noteData) && chartY >= 0 && chartY < GRID_SIZE;
+							});
+							closeNotes.sort(function(a:MetaNote, b:MetaNote) return Math.abs(a.strumTime - touch.y) < Math.abs(b.strumTime - touch.y) ? 1 : -1);
+
+							var closest = closeNotes[0];
+							if(closest != null && (!closest.isEvent || !lockedEvents))
+							{
+								if(touchPad.buttonH.pressed || holdingAlt) // Select Note/Event
+								{
+									var sel = selectedNotes.copy();
+									if(!selectedNotes.contains(closest))
+									{
+										selectedNotes.push(closest);
+										addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+									}
+									else if(!touchPad.buttonH.pressed || !holdingAlt)
+									{
+										resetSelectedNotes();
+										selectedNotes.remove(closest);
+										addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+									}
+		
+									trace('Notes selected: ' + selectedNotes.length);
+								}
+								else if(!FlxG.keys.pressed.CONTROL) // Remove Note/Event
+								{
+									var kind:String = !closest.isEvent ? 'note' : 'event';
+									trace('Removed $kind at time: ${closest.strumTime}');
+									if(!closest.isEvent)
+										notes.remove(closest);
+									else
+										events.remove(cast (closest, EventMetaNote));
+		
+									selectedNotes.remove(closest);
+									curRenderedNotes.remove(closest, true);
+									addUndoAction(DELETE_NOTE, !closest.isEvent ? {notes: [closest]} : {events: [closest]});
+								}
+								if(selectedNotes.length == 1) onSelectNote();
+								forceDataUpdate = true;
+							}
+							else if(!holdingAlt && touch.y >= trackInfo.grid.y && touch.y < trackInfo.grid.y + trackInfo.grid.height) // Add note
+							{
+								var strumTime:Float = (diffY / GRID_SIZE * Conductor.stepCrochet / curZoom) + cachedSectionTimes[curSec];
+								if(noteData >= 0)
+								{
+									trace('Added note at time: $strumTime');
+									var didAdd:Bool = false;
+		
+									var noteSetupData:Array<Dynamic> = [strumTime, noteData, 0];
+									var typeSelected:String = noteTypes[noteTypeDropDown.selectedIndex].trim();
+									if(typeSelected != null && typeSelected.length > 0)
+										noteSetupData.push(typeSelected);
+		
+									var noteAdded:MetaNote = createNote(noteSetupData);
+									for (num in sectionFirstNoteID...notes.length)
+									{
+										var note = notes[num];
+										if(note.strumTime >= strumTime)
+										{
+											notes.insert(num, noteAdded);
+											didAdd = true;
+											break;
+										}
+									}
+									if(!didAdd) notes.push(noteAdded);
+		
+									if(!holdingAlt)
+										resetSelectedNotes();
+		
+								selectedNotes.push(noteAdded);
+								addUndoAction(ADD_NOTE, {notes: [noteAdded]});
+
+								// 播放角色对应箭头动画
+								var targetChar:Character = (noteData >= 4) ? dad : boyfriend;
+								var direction:Int = noteData % 4;
+								if(targetChar != null && targetChar.visible)
+									playCharacterSing(targetChar, direction);
+							}
+								else if(!lockedEvents)
+								{
+									trace('Added event at time: $strumTime');
+									var didAdd:Bool = false;
+									
+									// 计算点击在Event轨道的具体索引（0-3）
+									var preferredTrackIndex:Null<Int> = null;
+									if(trackInfo.trackType == 'event')
+									{
+										var eventDiffX:Float = touch.x - trackInfo.trackX;
+										preferredTrackIndex = Std.int(Math.floor(eventDiffX / GRID_SIZE));
+										if(preferredTrackIndex < 0 || preferredTrackIndex >= EVENT_TRACK_COUNT) preferredTrackIndex = null;
+									}
+		
+									var eventAdded:EventMetaNote = createEvent([strumTime, [[eventsList[Std.int(Math.max(eventDropDown.selectedIndex, 0))][0], value1InputText.text, value2InputText.text, value3InputText.text, value4InputText.text]]], preferredTrackIndex);
+									for (num in sectionFirstEventID...events.length)
+									{
+										var event = events[num];
+										if(event.strumTime >= strumTime)
+										{
+											events.insert(num, eventAdded);
+											didAdd = true;
+											break;
+										}
+									}
+									if(!didAdd) events.push(eventAdded);
+		
+									if(!holdingAlt)
+										resetSelectedNotes();
+		
+									selectedNotes.push(eventAdded);
+									addUndoAction(ADD_NOTE, {events: [eventAdded]});
+								}
+								onSelectNote();
+								softReloadNotes();
+							}
+						}
+					}
+				}
+				else if(!ignoreClickForThisFrame)
+				{
+					if(touch.justPressed && !touchPad.buttonH.pressed)
+						resetSelectedNotes();
+		
+					dummyArrow.visible = false;
+				}
+			}
+		} else {
+			if(FlxG.mouse.justPressed && (FlxG.mouse.overlaps(mainBox.bg) || FlxG.mouse.overlaps(infoBox.bg)))
+				ignoreClickForThisFrame = true;
+
+			if(isMovingNotes && FlxG.mouse.justReleased)
+				stopMovingNotes();
+
+			var mouseTrackInfo = getTrackAtPosition(FlxG.mouse.x, FlxG.mouse.y);
+			if(mouseTrackInfo != null)
+			{
+				var diffX:Float = FlxG.mouse.x - mouseTrackInfo.trackX;
+				var diffY:Float = FlxG.mouse.y - mouseTrackInfo.grid.y;
+				if(!FlxG.keys.pressed.SHIFT)
+					diffY -= diffY % (GRID_SIZE / (curQuant/16));
+
+				if(mouseTrackInfo.nextGrid.visible) diffY = Math.min(diffY, mouseTrackInfo.grid.height + mouseTrackInfo.nextGrid.height);
+				else diffY = Math.min(diffY, mouseTrackInfo.grid.height);
+
+				if(mouseTrackInfo.prevGrid.visible) diffY = Math.max(diffY, -mouseTrackInfo.prevGrid.height);
+				else diffY = Math.max(diffY, 0);
+
+				// 根据UI列计算noteData（新布局：对手(0-3) → Event(4-7) → 玩家(8-11)）
+				var uiColumn:Int = Math.floor(diffX / GRID_SIZE);
+
+				// 根据轨道类型调整UI列偏移
+				if(mouseTrackInfo.trackType == 'event') uiColumn += GRID_COLUMNS_PER_PLAYER;
+				else if(mouseTrackInfo.trackType == 'player') uiColumn += GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT;
+
+				var noteData:Int = uiColumnToNoteData(uiColumn);
+				dummyArrow.visible = !selectionBox.visible;
+				
+				// 计算最终的UI列并应用间距偏移
+				var finalUIColumn:Int = noteDataToUIColumn(noteData);
+				var spacingOffset:Float = 0;
+				if (finalUIColumn >= GRID_COLUMNS_PER_PLAYER)
+				{
+					spacingOffset += TRACK_SPACING; // Event轨道后的间距
+				}
+				if (finalUIColumn >= GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT)
+				{
+					spacingOffset += TRACK_SPACING; // 玩家轨道前的间距
+				}
+				
+				// 如果是Event轨道，根据用户实际点击的具体Event轨道位置调整dummyArrow
+				if (mouseTrackInfo.trackType == 'event')
+				{
+					var eventTrackOffset:Int = Math.floor(diffX / GRID_SIZE);
+					dummyArrow.x = gridLayout.eventX + eventTrackOffset * GRID_SIZE;
+				}
+				else
+				{
+					dummyArrow.x = gridLayout.startX + finalUIColumn * GRID_SIZE + spacingOffset;
+				}
+
+				if(FlxG.keys.pressed.SHIFT || FlxG.mouse.y >= mouseTrackInfo.grid.y || !mouseTrackInfo.prevGrid.visible)
+					dummyArrow.y = mouseTrackInfo.grid.y + diffY;
+				else
+				{
+					var t:Float = (diffY - (GRID_SIZE / (curQuant/16)));
+					if(FlxG.mouse.y >= mouseTrackInfo.grid.y) t *= curZoom;
+					dummyArrow.y = mouseTrackInfo.grid.y + t;
+				}
+
+				if(isMovingNotes)
+				{
+					// Move note data
+					var nData:Int = Std.int(Math.max(0, noteData));
+					if(movingNotesLastData != nData)
+					{
+						var isFirst:Bool = true;
+						var movingNotesMinData:Int = 0;
+						var movingNotesMaxData:Int = 0;
+						for (note in selectedNotes) //Find boundaries first
+						{
+							if(note == null || note.isEvent) continue;
+
+							var data:Int = note.songData[1];
+							if(isFirst || data < movingNotesMinData) movingNotesMinData = data;
+							if(data > movingNotesMaxData) movingNotesMaxData = data;
+							isFirst = false;
+						}
+
+						var diff:Int = nData - movingNotesLastData;
+						var maxn:Int = (GRID_PLAYERS * GRID_COLUMNS_PER_PLAYER) - 1;
+						movingNotesMinData += diff;
+						movingNotesMaxData += diff;
+						if(movingNotesMinData < 0)
+							diff -= movingNotesMinData;
+						else if(movingNotesMaxData > maxn)
+							diff -= movingNotesMaxData - maxn;
+	
+						for (note in movingNotes)
+						{
+							if(note == null || note.isEvent) continue; //Events shouldn't change note data as they don't have one
+	
+							note.changeNoteData(note.songData[1] + diff);
+							positionNoteXByData(note);
+						}
+					}
+					movingNotesLastData = nData;
+	
+					// Move note strum time
+					if(dummyArrow.y != movingNotesLastY)
+					{
+						var diff:Float = dummyArrow.y - movingNotesLastY;
+						var curSecRow:Int = 0;
+						for (note in movingNotes) //Try to figure out new strum time for the notes, DEFINITELY INACCURATE WITH BPM CHANGING, ALTHOUGH UNTESTED
+						{
+							if(note == null) continue;
+	
+							note.chartY += diff;
+							var row:Float = (note.chartY / GRID_SIZE) * curZoom;
+							while(curSecRow + 1 < cachedSectionRow.length && cachedSectionRow[curSecRow] <= row)
+							{
+								curSecRow++;
+							}
+	
+							note.setStrumTime(Math.max(-5000, note.strumTime + (diff * cachedSectionCrochets[curSecRow] / 4) / GRID_SIZE * curZoom));
+							positionNoteYOnTime(note, curSecRow);
+							if(note.isEvent) cast (note, EventMetaNote).updateEventText();
+						}
+						movingNotesLastY = dummyArrow.y;
+					}
+				}
+				else if(FlxG.mouse.justPressed && !ignoreClickForThisFrame)
+				{
+					if(FlxG.keys.pressed.CONTROL && FlxG.mouse.justPressed)
+					{
+						if(selectedNotes.length > 0)
+							moveSelectedNotes(noteData, dummyArrow.y);
+						else
+							showOutput('You must select notes to move them!', true);
+					}
+					else if(FlxG.mouse.x >= gridLayout.startX && FlxG.mouse.x < gridLayout.startX + gridLayout.totalWidth)
+					{
+						var closeNotes:Array<MetaNote> = curRenderedNotes.members.filter(function(note:MetaNote)
+						{
+							var chartY:Float = FlxG.mouse.y - note.chartY;
+							if(note.isEvent && noteData < 0)
+						{
+							var eventDiffX:Float = FlxG.mouse.x - mouseTrackInfo.trackX;
+							var clickTrackIndex:Int = Std.int(Math.floor(eventDiffX / GRID_SIZE));
+							clickTrackIndex = Std.int(Math.max(0, Math.min(clickTrackIndex, EVENT_TRACK_COUNT - 1)));
+							var eventNote:EventMetaNote = cast note;
+							return eventNote.eventTrackIndex == clickTrackIndex && chartY >= 0 && chartY < GRID_SIZE;
+						}
+							return (!note.isEvent && note.songData[1] == noteData) && chartY >= 0 && chartY < GRID_SIZE;
+						});
+						closeNotes.sort(function(a:MetaNote, b:MetaNote) return Math.abs(a.strumTime - FlxG.mouse.y) < Math.abs(b.strumTime - FlxG.mouse.y) ? 1 : -1);
+
+						var closest = closeNotes[0];
+						if(closest != null && (!closest.isEvent || !lockedEvents))
+						{
+							if(FlxG.keys.pressed.SHIFT || holdingAlt) // Select Note/Event
+							{
+								var sel = selectedNotes.copy();
+								if(!selectedNotes.contains(closest))
+								{
+									selectedNotes.push(closest);
+									addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+								}
+								else if(!holdingAlt)
+								{
+									resetSelectedNotes();
+									selectedNotes.remove(closest);
+									addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+								}
+	
+								trace('Notes selected: ' + selectedNotes.length);
+							}
+							else if(!FlxG.keys.pressed.CONTROL) // Remove Note/Event
+							{
+								var kind:String = !closest.isEvent ? 'note' : 'event';
+								trace('Removed $kind at time: ${closest.strumTime}');
+								if(!closest.isEvent)
+									notes.remove(closest);
+								else
+									events.remove(cast (closest, EventMetaNote));
+	
+								selectedNotes.remove(closest);
+								curRenderedNotes.remove(closest, true);
+								addUndoAction(DELETE_NOTE, !closest.isEvent ? {notes: [closest]} : {events: [closest]});
+							}
+							if(selectedNotes.length == 1) onSelectNote();
+							forceDataUpdate = true;
+						}
+						else if(!holdingAlt && FlxG.mouse.y >= mouseTrackInfo.grid.y && FlxG.mouse.y < mouseTrackInfo.grid.y + mouseTrackInfo.grid.height) // Add note
+						{
+							var strumTime:Float = (diffY / GRID_SIZE * Conductor.stepCrochet / curZoom) + cachedSectionTimes[curSec];
+							if(noteData >= 0)
+							{
+								trace('Added note at time: $strumTime');
+								var didAdd:Bool = false;
+
+								var noteSetupData:Array<Dynamic> = [strumTime, noteData, 0];
+								var typeSelected:String = noteTypes[noteTypeDropDown.selectedIndex].trim();
+								if(typeSelected != null && typeSelected.length > 0)
+									noteSetupData.push(typeSelected);
+	
+								var noteAdded:MetaNote = createNote(noteSetupData);
+								for (num in sectionFirstNoteID...notes.length)
+								{
+									var note = notes[num];
+									if(note.strumTime >= strumTime)
+									{
+										notes.insert(num, noteAdded);
+										didAdd = true;
+										break;
+									}
+								}
+								if(!didAdd) notes.push(noteAdded);
+	
+								if(!holdingAlt)
+									resetSelectedNotes();
+	
+								selectedNotes.push(noteAdded);
+								addUndoAction(ADD_NOTE, {notes: [noteAdded]});
+
+								// 播放角色对应箭头动画
+								var targetChar:Character = (noteData >= 4) ? dad : boyfriend;
+								var direction:Int = noteData % 4;
+								if(targetChar != null && targetChar.visible)
+									playCharacterSing(targetChar, direction);
+							}
+							else if(!lockedEvents)
+							{
+								trace('Added event at time: $strumTime');
+								var didAdd:Bool = false;
+								
+								// 计算点击在Event轨道的具体索引（0-3）
+								var preferredTrackIndex:Null<Int> = null;
+								if(mouseTrackInfo.trackType == 'event')
+								{
+									var eventDiffX:Float = FlxG.mouse.x - mouseTrackInfo.trackX;
+									preferredTrackIndex = Std.int(Math.floor(eventDiffX / GRID_SIZE));
+									if(preferredTrackIndex < 0 || preferredTrackIndex >= EVENT_TRACK_COUNT) preferredTrackIndex = null;
+								}
+	
+								var eventAdded:EventMetaNote = createEvent([strumTime, [[eventsList[Std.int(Math.max(eventDropDown.selectedIndex, 0))][0], value1InputText.text, value2InputText.text, value3InputText.text, value4InputText.text]]], preferredTrackIndex);
+								for (num in sectionFirstEventID...events.length)
+								{
+									var event = events[num];
+									if(event.strumTime >= strumTime)
+									{
+										events.insert(num, eventAdded);
+										didAdd = true;
+										break;
+									}
+								}
+								if(!didAdd) events.push(eventAdded);
+	
+								if(!holdingAlt)
+									resetSelectedNotes();
+	
+								selectedNotes.push(eventAdded);
+								addUndoAction(ADD_NOTE, {events: [eventAdded]});
+							}
+							onSelectNote();
+							softReloadNotes();
+						}
+					}
+				}
+			}
+			else if(!ignoreClickForThisFrame)
+			{
+				if(FlxG.mouse.justPressed)
+					resetSelectedNotes();
+	
+				dummyArrow.visible = false;
+			}
+		}
+		ignoreClickForThisFrame = false;
+
+	// 基于Conductor.songPosition自动播放角色sing动画
+	if(showCharactersCheckBox.checked && charactersLoaded)
+	{
+		// 检测音符是否刚刚到达判定点（类似打击音的时机）
+		var currentStrumTime:Float = Conductor.songPosition;
+		var lastStrumTime:Float = lastTime;
+
+		for(note in notes)
+		{
+			if(note == null || note.isEvent) continue;
+
+			var noteStrumTime:Float = note.strumTime;
+			var noteData:Int = Std.int(note.noteData);
+
+			// 检查音符是否在上一帧和当前帧之间到达（类似打击音的触发时机）
+			if(noteStrumTime > lastStrumTime && noteStrumTime <= currentStrumTime)
+			{
+				if(note.mustPress)
+				{
+					// 玩家音符（noteData 0-3或4-7，取决于mustHitSection）
+					var direction:Int = noteData % 4;
+					if(boyfriend != null && boyfriend.visible)
+						playCharacterSing(boyfriend, direction);
+				}
+				else
+				{
+					// 对手音符（noteData 0-3或4-7，取决于mustHitSection）
+					var direction:Int = noteData % 4;
+					if(dad != null && dad.visible)
+						playCharacterSing(dad, direction);
+				}
+			}
+		}
+
+		// 处理长条持续的期间：防止角色回到idle动画
+		// 检查当前是否处于长条持续时间内
+		var boyfriendInSustain:Bool = false;
+		var dadInSustain:Bool = false;
+
+		for(note in notes)
+		{
+			if(note == null || note.isEvent) continue;
+
+			// 检查音符是否在当前时间范围内（包括长条持续时间）
+			var noteStartTime:Float = note.strumTime;
+			var noteEndTime:Float = note.strumTime + (note.sustainLength > 0 ? note.sustainLength : 0);
+
+			// 如果当前时间在音符的持续时间内
+			if(currentStrumTime >= noteStartTime && currentStrumTime <= noteEndTime)
+			{
+				if(note.mustPress && boyfriend != null && boyfriend.visible)
+				{
+					boyfriendInSustain = true;
+				}
+				else if(!note.mustPress && dad != null && dad.visible)
+				{
+					dadInSustain = true;
+				}
+			}
+		}
+
+		// 如果角色当前在长条中，重置holdTimer以防止回到idle
+		if(boyfriendInSustain && boyfriend.getAnimationName().startsWith('sing'))
+			boyfriend.holdTimer = 0;
+
+		if(dadInSustain && dad.getAnimationName().startsWith('sing'))
+			dad.holdTimer = 0;
+
+		// 处理idle动画的播放：每拍尝试播放idle动画
+		// sing Duration完成后在下一拍才播放idle
+		boyfriendSingFinishedBeat = handleIdleAnimationLoop(boyfriend, curBeatPure, boyfriendNeedIdleReplay, boyfriendSingFinishedBeat);
+		dadSingFinishedBeat = handleIdleAnimationLoop(dad, curBeatPure, dadNeedIdleReplay, dadSingFinishedBeat);
+
+		// 更新上一拍的记录
+		lastBeat = curBeatPure;
+	}
+
+		// 更新不受noteOffset影响的纯粹歌曲节拍（用于图标缩放）
+		var lastChangePure = Conductor.getBPMFromSeconds(Conductor.songPosition);
+		var shitPure = (Conductor.songPosition - lastChangePure.songTime) / lastChangePure.stepCrochet;
+		var curDecStepPure:Float = lastChangePure.stepTime + shitPure;
+		curStepPure = lastChangePure.stepTime + Math.floor(shitPure);
+		curBeatPure = Math.floor(curStepPure / 4);
+		
+		// 计算纯粹的section（不受noteOffset影响）
+		curSecPure = curSec; // 默认使用当前curSec
+		if (cachedSectionTimes != null && cachedSectionTimes.length > 0)
+		{
+			// 使用纯粹的songPosition（不受noteOffset影响）来计算section
+			var songPosPure = Conductor.songPosition;
+			while (curSecPure > 0 && songPosPure < cachedSectionTimes[curSecPure])
+				curSecPure--;
+			while (curSecPure < cachedSectionTimes.length - 1 && songPosPure >= cachedSectionTimes[curSecPure + 1])
+				curSecPure++;
+		}
+		
+		songBeatNoOffset = curBeatPure;
+		
+		// Add icon bounce effect on every beat（使用不受offset影响的节拍）
+		if (iconBopEnabled && songBeatNoOffset != lastBeatHit) {
+			var mustHitSection:Bool = (PlayState.SONG.notes[curSec] != null && PlayState.SONG.notes[curSec].mustHitSection);
+			if(iconbopTween != null)
+				iconbopTween.cancel();
+			for (icon in icons) {
+				if ((mustHitSection && icon.ID == 1) || (!mustHitSection && icon.ID == 2)) {
+					icon.scale.set(0.4, 0.4); // Slightly increase the size for the bounce effect
+					//FlxTween.tween(icon.scale, {x: 0.3, y: 0.3}, 0.17, {ease: FlxEase.linear}); // Smoothly return to original size
+					iconbopTween = FlxTween.tween(icon.scale, {x: 0.3, y: 0.3}, 0.15, {
+						onComplete: function(twn:FlxTween) {
+							iconbopTween = null;
+						}});
+			}
+			}
+		}
+
+		// Add background bounce effect on every beat
+		if (bgBopEnabled && songBeatNoOffset != lastBeatHit) {
+			if(bgBopTween != null)
+				bgBopTween.cancel();
+			// 立即设置放大效果
+			bg.scale.set(1.02, 1.02);
+			// 快速缩小至默认大小
+			bgBopTween = FlxTween.tween(bg.scale, {x: 1.0, y: 1.0}, 0.1, {
+				ease: FlxEase.quadOut,
+				onComplete: function(twn:FlxTween) {
+					bgBopTween = null;
+				}
+			});
+
+		}
+
+		if(Conductor.songPosition != lastTime || forceDataUpdate)
+		{
+			var curTime:String = FlxStringUtil.formatTime(Conductor.songPosition / 1000, true);
+			var songLength:String = (FlxG.sound.music != null) ? FlxStringUtil.formatTime(FlxG.sound.music.length / 1000, true) : '???';
+			var str:String =  '$curTime / $songLength' +
+							  '\n\nSection: $curSecPure' +
+							  '\nBeat: $curBeatPure' +
+							  '\nStep: $curStepPure' +
+							  '\n\nBeat Snap: ${curQuant} / 16' +
+							  '\nSelected: ${selectedNotes.length}';
+
+			if(str != infoText.text)
+			{
+				infoText.text = str;
+				if(infoText.autoSize) infoText.autoSize = false;
+			}
+
+var vortexPlaying:Bool = (vortexEnabled && FlxG.sound.music != null && FlxG.sound.music.playing);
+		var canPlayHitSound:Bool = (FlxG.sound.music != null && FlxG.sound.music.playing && lastTime < Conductor.songPosition);
+		
+		for (note in curRenderedNotes)
+		{
+			if(note == null || note.isEvent) continue;
+
+			note.alpha = (note.strumTime >= Conductor.songPosition) ? 1 : 0.6;
+			if(Conductor.songPosition > note.strumTime && lastTime <= note.strumTime)
+			{
+				if(canPlayHitSound)
+				{
+					// 使用音效池轮询播放，确保每个音符都能发声
+					if(note.mustPress && hitsoundPlayerStepper.value > 0)
+					{
+						var sound:FlxSound = hitSoundPool[hitSoundPoolIndex];
+						sound.loadEmbedded(Paths.sound('CLAP'));
+						sound.volume = hitsoundPlayerStepper.value;
+						sound.pan = -1; // 玩家音符：纯左声道
+						sound.play();
+						hitSoundPoolIndex = (hitSoundPoolIndex + 1) % hitSoundPoolSize;
+					}
+					else if(!note.mustPress && hitsoundOpponentStepper.value > 0)
+					{
+						var sound:FlxSound = hitSoundPool[hitSoundPoolIndex];
+						sound.loadEmbedded(Paths.sound('SNAP'));
+						sound.volume = hitsoundOpponentStepper.value;
+						sound.pan = 1; // 对手音符：纯右声道
+						sound.play();
+						hitSoundPoolIndex = (hitSoundPoolIndex + 1) % hitSoundPoolSize;
+					}
+				}
+
+					if(vortexPlaying)
+					{
+						var strumNote:StrumNote = strumLineNotes.members[note.songData[1]];
+						if(strumNote != null)
+						{
+							strumNote.playAnim('confirm', true);
+							strumNote.resetAnim = Math.max(Conductor.stepCrochet * 1.25, note.sustainLength) / 1000 / playbackRate;
+						}
+					}
+				}
+			}
+			forceDataUpdate = false;
+			
+			// moved from beatHit()
+			if(metronomeStepper.value > 0 && lastBeatHit != songBeatNoOffset)
+				FlxG.sound.play(Paths.sound('Metronome_Tick'), metronomeStepper.value);
+
+			lastBeatHit = songBeatNoOffset;
+		}
+
+		if(selectedNotes.length > 0)
+		{
+			noteSelectionSine += elapsed;
+			var sineValue:Float = 0.75 + Math.cos(Math.PI * noteSelectionSine * (isMovingNotes ? 8 : 2)) / 4;
+			//trace(sineValue);
+
+			var qPress = (touchPad.buttonUp2.justPressed || FlxG.keys.justPressed.Q);
+			var ePress = (touchPad.buttonDown2.justPressed || FlxG.keys.justPressed.E);
+			var addSus = (touchPad.buttonY.pressed || FlxG.keys.pressed.SHIFT ? 4 : 1) * (Conductor.stepCrochet / 2);
+			if(qPress) addSus *= -1;
+
+			if(qPress != ePress && selectedNotes.length != 1)
+				susLengthStepper.value += addSus;
+
+			var noteSec:Int = 0;
+			for (note in selectedNotes)
+			{
+				if(note == null || !note.exists) continue;
+
+				if(!note.isEvent)
+				{
+					if(qPress != ePress)
+					{
+						while(cachedSectionTimes.length > noteSec + 1 && cachedSectionTimes[noteSec + 1] <= note.strumTime)
+							noteSec++;
+
+						note.setSustainLength(note.sustainLength + addSus, cachedSectionCrochets[noteSec] / 4, curZoom);
+						if(selectedNotes.length == 1)
+							susLengthStepper.value = note.sustainLength;
+					}
+					note.animation.update(elapsed); //let selected notes be animated for better visibility
+				}
+				note.colorTransform.redMultiplier = note.colorTransform.greenMultiplier = note.colorTransform.blueMultiplier = sineValue;
+			}
+		}
+		else noteSelectionSine = 0;
+
+		outputTxt.alpha = outputAlpha;
+		outputTxt.visible = (outputAlpha > 0);
+		FlxG.camera.scroll.y = scrollY;
+		lastFocus = PsychUIInputText.focusOn;
+	}
+
+	function moveSelectedNotes(noteData:Int = 0, lastY:Float) //This turns selected notes into moving notes
+	{
+		var originalNotes:Array<MetaNote> = [];
+		var originalEvents:Array<EventMetaNote> = [];
+		var movedNotes:Array<MetaNote> = [];
+		var movedEvents:Array<EventMetaNote> = [];
+		for (note in selectedNotes)
+		{
+			if(note == null) continue;
+
+			if(!note.isEvent)
+			{
+				notes.remove(note);
+				var secNum:Int = 0;
+				for (time in cachedSectionTimes)
+				{
+					if(time > note.strumTime) break;
+					secNum++;
+				}
+				originalNotes.push(note);
+				var mov:MetaNote = createNote(note.songData, secNum);
+				movingNotes.add(mov);
+				movedNotes.push(mov);
+			}
+			else
+			{
+				events.remove(cast (note, EventMetaNote));
+				originalEvents.push(cast (note, EventMetaNote));
+				var mov:EventMetaNote = createEvent(note.songData);
+				movingNotes.add(mov);
+				movedEvents.push(mov);
+			}
+		}
+		selectedNotes = movingNotes.members.copy();
+		isMovingNotes = true;
+		movingNotesLastY = lastY;
+		movingNotesLastData = noteData;
+		movingNotes.sort(cast PlayState.sortByTime);
+		addUndoAction(MOVE_NOTE, {originalNotes: originalNotes, originalEvents: originalEvents, movedNotes: movedNotes, movedEvents: movedEvents});
+		softReloadNotes();
+	}
+
+	function stopMovingNotes() //This turns moving notes into saved notes
+	{
+		var pushedNotes:Array<MetaNote> = [];
+		var pushedEvents:Array<EventMetaNote> = [];
+		movingNotes.forEachAlive(function(note:MetaNote)
+		{
+			if(!note.isEvent)
+			{
+				notes.push(note);
+				pushedNotes.push(note);
+			}
+			else
+			{
+				events.push(cast (note, EventMetaNote));
+				pushedEvents.push(cast (note, EventMetaNote));
+			}
+		});
+		notes.sort(PlayState.sortByTime);
+		events.sort(PlayState.sortByTime);
+		movingNotes.clear();
+		isMovingNotes = false;
+		softReloadNotes();
+	}
+
+	function makeNoteDataCopy(originalData:Array<Dynamic>, isEvent:Bool)
+	{
+		var dataCopy:Array<Dynamic> = originalData.copy();
+		if(isEvent)
+		{
+			var eventGrp:Array<Array<Dynamic>> = cast dataCopy[1].copy();
+			for (num => subEvent in eventGrp)
+				eventGrp[num] = subEvent.copy();
+
+			dataCopy[1] = eventGrp;
+		}
+		return dataCopy;
+	}
+
+	function updateScrollY()
+	{
+		var secStartTime:Null<Float> = cast cachedSectionTimes[curSec];
+		var secCrochet:Null<Float> = cast cachedSectionCrochets[curSec];
+		var secRows:Null<Float> = cast cachedSectionRow[curSec];
+		if(secStartTime == null || secCrochet == null || secRows == null) return;
+
+		scrollY = (((Conductor.songPosition - secStartTime) / secCrochet * GRID_SIZE * 4) + (secRows * GRID_SIZE)) * curZoom - FlxG.height/2;
+		
+		// 轨道颜色覆盖层的位置是固定的，不需要在scroll时更新（已在create时设置）
+		// 只确保覆盖层存在即可
+	}
+
+	function updateSelectionBox()
+	{
+		var diffX:Float = FlxG.mouse.screenX - selectionStart.x;
+		var diffY:Float = FlxG.mouse.screenY - selectionStart.y;
+		selectionBox.setPosition(selectionStart.x, selectionStart.y);
+
+		if(diffX < 0) //Fixes negative X scale
+		{
+			diffX = Math.abs(diffX);
+			selectionBox.x -= diffX;
+		}
+		if(diffY < 0) //Fixes negative Y scale
+		{
+			diffY = Math.abs(diffY);
+			selectionBox.y -= diffY;
+		}
+		selectionBox.scale.set(diffX, diffY);
+		selectionBox.updateHitbox();
+	}
+
+	function showOutput(message:String, isError:Bool = false)
+	{
+		trace(message);
+		outputTxt.text = message;
+		outputTxt.y = FlxG.height - outputTxt.height - 30;
+		outputAlpha = 4;
+		if(isError)
+		{
+			FlxG.sound.play(Paths.sound('cancelMenu'), 0.6);
+			outputTxt.color = FlxColor.RED;
+		}
+		else
+		{
+			FlxG.sound.play(Paths.sound('scrollMenu'), 0.6);
+			outputTxt.color = FlxColor.WHITE;
+		}
+	}
+
+	function resetSelectedNotes()
+	{
+		for (note in selectedNotes)
+		{
+			if(note == null || !note.exists) continue;
+
+			note.colorTransform.redMultiplier = note.colorTransform.greenMultiplier = note.colorTransform.blueMultiplier = 1;
+			if(note.animation.curAnim != null) note.animation.curAnim.curFrame = 0;
+		}
+		selectedNotes = [];
+		onSelectNote();
+		forceDataUpdate = true;
+	}
+
+	function onSelectNote()
+	{
+		if(selectedNotes.length == 1) //Only one note selected
+		{
+			var note:MetaNote = selectedNotes[0];
+			strumTimeStepper.value = note.strumTime;
+			if(!note.isEvent) //Normal note
+			{
+				if(!note.isEvent)
+				{
+					susLengthLastVal = susLengthStepper.value = note.sustainLength;
+					noteTypeDropDown.selectedIndex = Std.int(Math.max(0, noteTypes.indexOf(note.noteType)));
+				}
+				else
+				{
+					susLengthLastVal = susLengthStepper.value = 0;
+					noteTypeDropDown.selectedLabel = '';
+				}
+			}
+			else //Event note
+			{
+				var eventNote:EventMetaNote = cast (selectedNotes[0], EventMetaNote);
+				updateSelectedEventText();
+			}
+		}
+		else if(selectedNotes.length > 1)
+		{
+			susLengthStepper.min = -susLengthStepper.max;
+			susLengthLastVal = susLengthStepper.value = 0;
+			strumTimeStepper.value = selectedNotes[0].strumTime;
+			noteTypeDropDown.selectedLabel = '';
+			eventDropDown.selectedLabel = '';
+			value1InputText.text = '';
+			value2InputText.text = '';
+			value3InputText.text = '';
+			value4InputText.text = '';
+		}
+		forceDataUpdate = true;
+	}
+
+	function updateSelectedEventText()
+	{
+		if(selectedNotes.length == 1 && selectedNotes[0].isEvent)
+		{
+			var eventNote:EventMetaNote = cast (selectedNotes[0], EventMetaNote);
+			curEventSelected = Std.int(FlxMath.bound(curEventSelected, 0, eventNote.events.length - 1));
+			selectedEventText.text = 'Selected Event: ${curEventSelected + 1} / ${eventNote.events.length}';
+			selectedEventText.visible = true;
+			
+			var myEvent:Array<String> = eventNote.events[curEventSelected];
+			if(myEvent != null)
+			{
+				var eventName:String = (myEvent[0] != null) ? myEvent[0] : '';
+				for (num => event in eventsList)
+				{
+					if(event[0] == eventName)
+					{
+						eventDropDown.selectedIndex = num;
+						break;
+					}
+				}
+				value1InputText.text = (myEvent[1] != null) ? myEvent[1] : '';
+				value2InputText.text = (myEvent[2] != null) ? myEvent[2] : '';
+				value3InputText.text = (myEvent[3] != null) ? myEvent[3] : '';
+				value4InputText.text = (myEvent[4] != null) ? myEvent[4] : '';
+			}
+		}
+		else selectedEventText.visible = false;
+	}
+
+	function createGrids()
+	{
+		var destroyed:Bool = false;
+		var stripes:Array<Int> = null;
+		if(opponentGridBg != null)
+		{
+			stripes = opponentGridBg.stripes;
+			remove(prevOpponentGridBg);
+			remove(prevEventGridBg);
+			remove(prevPlayerGridBg);
+			remove(opponentGridBg);
+			remove(eventGridBg);
+			remove(playerGridBg);
+			remove(nextOpponentGridBg);
+			remove(nextEventGridBg);
+			remove(nextPlayerGridBg);
+			prevOpponentGridBg = FlxDestroyUtil.destroy(prevOpponentGridBg);
+			prevEventGridBg = FlxDestroyUtil.destroy(prevEventGridBg);
+			prevPlayerGridBg = FlxDestroyUtil.destroy(prevPlayerGridBg);
+			opponentGridBg = FlxDestroyUtil.destroy(opponentGridBg);
+			eventGridBg = FlxDestroyUtil.destroy(eventGridBg);
+			playerGridBg = FlxDestroyUtil.destroy(playerGridBg);
+			nextOpponentGridBg = FlxDestroyUtil.destroy(nextOpponentGridBg);
+			nextEventGridBg = FlxDestroyUtil.destroy(nextEventGridBg);
+			nextPlayerGridBg = FlxDestroyUtil.destroy(nextPlayerGridBg);
+			destroyed = true;
+		}
+
+		// 创建三个独立的轨道网格
+		var startX:Float = FlxG.width / 2;
+		
+		// 计算总宽度并居中
+		var opponentWidth:Float = GRID_SIZE * GRID_COLUMNS_PER_PLAYER;
+		var eventWidth:Float = SHOW_EVENT_COLUMN ? GRID_SIZE * EVENT_TRACK_COUNT : 0;
+		var playerWidth:Float = GRID_SIZE * GRID_COLUMNS_PER_PLAYER;
+		var spacingWidth:Float = TRACK_SPACING * (SHOW_EVENT_COLUMN ? 2 : 1);
+		var totalWidth:Float = opponentWidth + eventWidth + playerWidth + spacingWidth;
+		
+		startX = (FlxG.width - totalWidth) / 2;
+
+		// 对手轨道网格
+		opponentGridBg = new ChartingGridSprite(GRID_COLUMNS_PER_PLAYER, gridColors[0], gridColors[1]);
+		opponentGridBg.x = startX;
+		opponentGridBg.y = FlxG.height / 2;
+		
+		// Event轨道网格
+		if(SHOW_EVENT_COLUMN)
+		{
+			eventGridBg = new ChartingGridSprite(EVENT_TRACK_COUNT, gridColors[0], gridColors[1]);
+			eventGridBg.x = startX + opponentWidth + TRACK_SPACING;
+			eventGridBg.y = opponentGridBg.y;
+		}
+		
+		// 玩家轨道网格
+		playerGridBg = new ChartingGridSprite(GRID_COLUMNS_PER_PLAYER, gridColors[0], gridColors[1]);
+		playerGridBg.x = startX + opponentWidth + eventWidth + TRACK_SPACING * (SHOW_EVENT_COLUMN ? 2 : 1);
+		playerGridBg.y = opponentGridBg.y;
+
+		// 创建前一节和下一节的网格
+		prevOpponentGridBg = new ChartingGridSprite(GRID_COLUMNS_PER_PLAYER, gridColorsOther[0], gridColorsOther[1]);
+		prevOpponentGridBg.x = opponentGridBg.x;
+		prevOpponentGridBg.y = opponentGridBg.y;
+		prevOpponentGridBg.stripes = opponentGridBg.stripes = stripes;
+		
+		nextOpponentGridBg = new ChartingGridSprite(GRID_COLUMNS_PER_PLAYER, gridColorsOther[0], gridColorsOther[1]);
+		nextOpponentGridBg.x = opponentGridBg.x;
+		nextOpponentGridBg.y = opponentGridBg.y;
+		nextOpponentGridBg.stripes = opponentGridBg.stripes;
+		
+		if(SHOW_EVENT_COLUMN)
+		{
+			prevEventGridBg = new ChartingGridSprite(EVENT_TRACK_COUNT, gridColorsOther[0], gridColorsOther[1]);
+			prevEventGridBg.x = eventGridBg.x;
+			prevEventGridBg.y = eventGridBg.y;
+			prevEventGridBg.stripes = eventGridBg.stripes = stripes;
+			
+			nextEventGridBg = new ChartingGridSprite(EVENT_TRACK_COUNT, gridColorsOther[0], gridColorsOther[1]);
+			nextEventGridBg.x = eventGridBg.x;
+			nextEventGridBg.y = eventGridBg.y;
+			nextEventGridBg.stripes = eventGridBg.stripes;
+		}
+		
+		prevPlayerGridBg = new ChartingGridSprite(GRID_COLUMNS_PER_PLAYER, gridColorsOther[0], gridColorsOther[1]);
+		prevPlayerGridBg.x = playerGridBg.x;
+		prevPlayerGridBg.y = playerGridBg.y;
+		prevPlayerGridBg.stripes = playerGridBg.stripes = stripes;
+		
+		nextPlayerGridBg = new ChartingGridSprite(GRID_COLUMNS_PER_PLAYER, gridColorsOther[0], gridColorsOther[1]);
+		nextPlayerGridBg.x = playerGridBg.x;
+		nextPlayerGridBg.y = playerGridBg.y;
+		nextPlayerGridBg.stripes = playerGridBg.stripes;
+		
+		if(destroyed)
+		{
+			insert(getFirstNull(), prevOpponentGridBg);
+			insert(getFirstNull(), nextOpponentGridBg);
+			insert(getFirstNull(), opponentGridBg);
+			if(SHOW_EVENT_COLUMN)
+			{
+				insert(getFirstNull(), prevEventGridBg);
+				insert(getFirstNull(), nextEventGridBg);
+				insert(getFirstNull(), eventGridBg);
+			}
+			insert(getFirstNull(), prevPlayerGridBg);
+			insert(getFirstNull(), nextPlayerGridBg);
+			insert(getFirstNull(), playerGridBg);
+			loadSection();
+		}
+		else
+		{
+			add(prevOpponentGridBg);
+			add(nextOpponentGridBg);
+			add(opponentGridBg);
+			if(SHOW_EVENT_COLUMN)
+			{
+				add(prevEventGridBg);
+				add(nextEventGridBg);
+				add(eventGridBg);
+			}
+			add(prevPlayerGridBg);
+			add(nextPlayerGridBg);
+			add(playerGridBg);
+		}
+	}
+
+	// 根据UI列获取对应的网格
+	function getGridByUIColumn(uiColumn:Int):ChartingGridSprite
+	{
+		if(uiColumn < GRID_COLUMNS_PER_PLAYER)
+		{
+			return opponentGridBg;
+		}
+		else if(SHOW_EVENT_COLUMN && uiColumn < GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT)
+		{
+			return eventGridBg;
+		}
+		else
+		{
+			return playerGridBg;
+		}
+	}
+
+	// 获取所有轨道的总宽度和起始位置
+	function getGridLayout():{startX:Float, opponentX:Float, eventX:Float, playerX:Float, totalWidth:Float}
+	{
+		var opponentWidth:Float = GRID_SIZE * GRID_COLUMNS_PER_PLAYER;
+		var eventWidth:Float = SHOW_EVENT_COLUMN ? GRID_SIZE * EVENT_TRACK_COUNT : 0;
+		var playerWidth:Float = GRID_SIZE * GRID_COLUMNS_PER_PLAYER;
+		var spacingWidth:Float = TRACK_SPACING * (SHOW_EVENT_COLUMN ? 2 : 1);
+		var totalWidth:Float = opponentWidth + eventWidth + playerWidth + spacingWidth;
+		var startX:Float = (FlxG.width - totalWidth) / 2;
+		
+		return {
+			startX: startX,
+			opponentX: startX,
+			eventX: startX + opponentWidth + TRACK_SPACING,
+			playerX: startX + opponentWidth + eventWidth + TRACK_SPACING * (SHOW_EVENT_COLUMN ? 2 : 1),
+			totalWidth: totalWidth
+		};
+	}
+
+	// 获取指定位置的轨道信息和网格
+	function getTrackAtPosition(x:Float, y:Float):{grid:ChartingGridSprite, prevGrid:ChartingGridSprite, nextGrid:ChartingGridSprite, trackX:Float, trackType:String}
+	{
+		var gridLayout = getGridLayout();
+		var opponentWidth:Float = GRID_SIZE * GRID_COLUMNS_PER_PLAYER;
+		var eventWidth:Float = SHOW_EVENT_COLUMN ? GRID_SIZE * EVENT_TRACK_COUNT : 0;
+
+		if(x >= gridLayout.opponentX && x < gridLayout.opponentX + opponentWidth)
+		{
+			return {
+				grid: opponentGridBg,
+				prevGrid: prevOpponentGridBg,
+				nextGrid: nextOpponentGridBg,
+				trackX: gridLayout.opponentX,
+				trackType: 'opponent'
+			};
+		}
+		else if(SHOW_EVENT_COLUMN && x >= gridLayout.eventX && x < gridLayout.eventX + eventWidth)
+		{
+			return {
+				grid: eventGridBg,
+				prevGrid: prevEventGridBg,
+				nextGrid: nextEventGridBg,
+				trackX: gridLayout.eventX,
+				trackType: 'event'
+			};
+		}
+		else if(x >= gridLayout.playerX && x < gridLayout.playerX + opponentWidth)
+		{
+			return {
+				grid: playerGridBg,
+				prevGrid: prevPlayerGridBg,
+				nextGrid: nextPlayerGridBg,
+				trackX: gridLayout.playerX,
+				trackType: 'player'
+			};
+		}
+
+		return null;
+	}
+
+	var cachedSectionRow:Array<Int>;
+	var cachedSectionTimes:Array<Float>;
+	var cachedSectionCrochets:Array<Float>;
+	var cachedSectionBPMs:Array<Float>;
+	function loadChart(song:SwagSong)
+	{
+		PlayState.SONG = song;
+		StageData.loadDirectory(PlayState.SONG);
+		Conductor.bpm = PlayState.SONG.bpm;
+	}
+
+	function loadMusic(?killAudio:Bool = false)
+	{
+		setSongPlaying(false);
+		var time:Float = Conductor.songPosition;
+
+		if(killAudio)
+		{
+			var sndsToKill:Array<String> = [];
+			for (key => snd in Paths.currentTrackedSounds)
+			{
+				//trace(key, snd);
+				if(key.contains('/songs/${Paths.formatToSongPath(PlayState.SONG.song)}/') && snd != null)
+				{
+					sndsToKill.push(key);
+					snd.close();
+				}
+			}
+
+			for (key in sndsToKill)
+			{
+				Assets.cache.clear(key);
+				Paths.currentTrackedSounds.remove(key);
+				Paths.localTrackedAssets.remove(key);
+			}
+		}
+
+		try
+		{
+			FlxG.sound.playMusic(Paths.inst(PlayState.SONG.song, PlayState.SONG.specialInst), 0);
+			FlxG.sound.music.pause();
+			FlxG.sound.music.time = time;
+			FlxG.sound.music.onComplete = (function() songFinished = true);
+		}
+		catch(e:Exception)
+		{
+			FlxG.log.error('Error loading song: $e');
+			return;
+		}
+
+		@:privateAccess vocals.cleanup(true);
+		@:privateAccess opponentVocals.cleanup(true);
+		if (PlayState.SONG.needsVoices)
+		{
+			try
+			{
+				// 加载玩家vocal
+				var playerVocalName:String = characterData.vocalsP1;
+				trace('Loading player vocal: name=$playerVocalName, specialVocal=${PlayState.SONG.specialVocal}');
+				var playerVocals:Sound = Paths.voices(PlayState.SONG.song, playerVocalName, PlayState.SONG.specialVocal);
+				trace('Player vocal result: ${playerVocals != null ? "found" : "not found"}');
+				
+				// 如果指定的vocal不存在，尝试使用Player
+				if (playerVocals == null) {
+					trace('Trying Player fallback...');
+					playerVocals = Paths.voices(PlayState.SONG.song, 'Player', PlayState.SONG.specialVocal);
+					trace('Player fallback result: ${playerVocals != null ? "found" : "not found"}');
+				}
+				
+				// 如果Player也不存在，使用默认voices
+				if (playerVocals != null) {
+					vocals.loadEmbedded(playerVocals);
+				} else {
+					trace('Using default voices...');
+					vocals.loadEmbedded(Paths.voices(PlayState.SONG.song, null, PlayState.SONG.specialVocal));
+				}
+				vocals.volume = 0;
+				vocals.play();
+				vocals.pause();
+				vocals.time = time;
+				
+				// 加载对手vocal
+				var oppVocalName:String = characterData.vocalsP2;
+				trace('Loading opponent vocal: name=$oppVocalName, specialVocal=${PlayState.SONG.specialVocal}');
+				var oppVocals:Sound = Paths.voices(PlayState.SONG.song, oppVocalName, PlayState.SONG.specialVocal);
+				trace('Opponent vocal result: ${oppVocals != null ? "found" : "not found"}');
+				
+				// 如果指定的vocal不存在，尝试使用Opponent
+				if (oppVocals == null) {
+					trace('Trying Opponent fallback...');
+					oppVocals = Paths.voices(PlayState.SONG.song, 'Opponent', PlayState.SONG.specialVocal);
+					trace('Opponent fallback result: ${oppVocals != null ? "found" : "not found"}');
+				}
+				
+				// 如果找到vocal文件，加载它
+				if(oppVocals != null)
+				{
+					opponentVocals.loadEmbedded(oppVocals);
+					opponentVocals.volume = 0;
+					opponentVocals.play();
+					opponentVocals.pause();
+					opponentVocals.time = time;
+				}
+			}
+			catch (e:Dynamic) {}
+		}
+
+		#if DISCORD_ALLOWED
+		DiscordClient.changePresence('Chart Editor', 'Song: ' + PlayState.SONG.song);
+		#end
+
+		updateAudioVolume();
+		setPitch();
+		_cacheSections();
+	}
+
+	function onSongComplete()
+	{
+		trace('song completed');
+		setSongPlaying(false);
+		Conductor.songPosition = FlxG.sound.music.time = vocals.time = opponentVocals.time = FlxG.sound.music.length - 1;
+		curSec = PlayState.SONG.notes.length - 1;
+		forceDataUpdate = true;
+	}
+
+	function updateAudioVolume()
+	{
+		FlxG.sound.music.volume = instVolumeStepper.value;
+		vocals.volume = playerVolumeStepper.value;
+		opponentVocals.volume = opponentVolumeStepper.value;
+		if(instMuteCheckBox.checked) FlxG.sound.music.volume = 0;
+		if(playerMuteCheckBox.checked) vocals.volume = 0;
+		if(opponentMuteCheckBox.checked) opponentVocals.volume = 0;
+	}
+
+	var playbackRate:Float = 1;
+	function setPitch(?value:Null<Float>)
+	{
+		#if FLX_PITCH
+		if(value == null) value = playbackRate;
+		FlxG.sound.music.pitch = value;
+		vocals.pitch = value;
+		opponentVocals.pitch = value;
+		#end
+	}
+
+	function setSongPlaying(doPlay:Bool)
+	{
+		if(FlxG.sound.music == null) return;
+
+		vocals.time = FlxG.sound.music.time;
+		opponentVocals.time = FlxG.sound.music.time;
+
+		if(doPlay)
+		{
+			FlxG.sound.music.play();
+			if(FlxG.sound.music.time < vocals.length) vocals.play(true, FlxG.sound.music.time);
+			if(FlxG.sound.music.time < opponentVocals.length) opponentVocals.play(true, FlxG.sound.music.time);
+			updateAudioVolume();
+		}
+		else
+		{
+			FlxG.sound.music.pause();
+			vocals.pause();
+			opponentVocals.pause();
+		}
+
+		for (note in strumLineNotes)
+		{
+			note.alpha = doPlay ? 1 : 0.4;
+			if(!doPlay)
+			{
+				note.playAnim('static');
+				note.resetAnim = 0;
+			}
+		}
+	}
+
+	function reloadNotes()
+	{
+		selectedNotes = [];
+		for (note in notes) if(note != null) note.destroy();
+		for (event in events) if(event != null) event.destroy();
+		notes = [];
+		events = [];
+		undoActions = [];
+		
+		preloadedNoteData = [];
+		preloadedSecNum = [];
+		preloadedMetaNotes = [];
+
+		if (ClientPrefs.data.useOptimizedNoteLoading)
+		{
+			// 优化模式：只预保存数据
+			for (secNum => section in PlayState.SONG.notes)
+				for (note in section.sectionNotes)
+					if(note != null)
+					{
+						preloadedNoteData.push(note);
+						preloadedSecNum.push(secNum);
+						preloadedMetaNotes.push(null); // 预留位置，后面才创建 MetaNote
+					}
+
+			trace('Optimized mode: preloaded ${preloadedNoteData.length} notes, no MetaNotes created yet');
+		}
+		else
+		{
+			// 传统模式：立即创建所有 MetaNote
+			for (secNum => section in PlayState.SONG.notes)
+				for (note in section.sectionNotes)
+					if(note != null)
+						notes.push(createNote(note, secNum));
+		}
+
+		for (eventNum => event in PlayState.SONG.events)
+			if(event != null && (cachedSectionTimes.length < 1 || event[0] < cachedSectionTimes[cachedSectionTimes.length-1])) //dont spawn events over the time limit
+				events.push(createEvent(event));
+
+		notes.sort(PlayState.sortByTime);
+		events.sort(PlayState.sortByTime);
+
+		trace('Note count: ${notes.length}');
+		trace('Events count: ${events.length}');
+		loadSection();
+	}
+
+	function createNote(note:Dynamic, ?secNum:Null<Int> = null)
+	{
+		if(secNum == null) secNum = curSec;
+		var section = PlayState.SONG.notes[secNum];
+
+		var daStrumTime:Float = note[0];
+		var daNoteData:Int = Std.int(note[1] % GRID_COLUMNS_PER_PLAYER);
+		var gottaHitNote:Bool = (note[1] < GRID_COLUMNS_PER_PLAYER);
+
+		var swagNote:MetaNote = new MetaNote(daStrumTime, daNoteData, note);
+		swagNote.mustPress = gottaHitNote;
+		swagNote.setSustainLength(note[2], cachedSectionCrochets[secNum] / 4, curZoom);
+		swagNote.gfNote = (section.gfSection && gottaHitNote == section.mustHitSection);
+		swagNote.noteType = note[3];
+		swagNote.scrollFactor.x = 0;
+		var txt:FlxText = swagNote.findNoteTypeText(swagNote.noteType != null ? noteTypes.indexOf(swagNote.noteType) : 0);
+		if(txt != null) txt.visible = showNoteTypeLabels;
+
+		swagNote.updateHitbox();
+		if(swagNote.width > swagNote.height)
+			swagNote.setGraphicSize(GRID_SIZE);
+		else
+			swagNote.setGraphicSize(0, GRID_SIZE);
+
+		swagNote.updateHitbox();
+		swagNote.active = false;
+		positionNoteXByData(swagNote);
+		positionNoteYOnTime(swagNote, secNum);
+		return swagNote;
+	}
+
+	function createEvent(event:Dynamic, ?preferredTrackIndex:Null<Int> = null)
+	{
+		var daStrumTime:Float = event[0];
+
+		var trackIndex:Int = 0;
+		if (preferredTrackIndex != null && preferredTrackIndex >= 0 && preferredTrackIndex < EVENT_TRACK_COUNT)
+		{
+			// 如果指定了首选轨道索引，检查该轨道在该时间点是否已有事件
+			var isPreferredTrackAvailable:Bool = true;
+			for (existingEvent in events)
+			{
+				if (Math.abs(existingEvent.strumTime - daStrumTime) < 0.0001 && existingEvent.eventTrackIndex == preferredTrackIndex)
+				{
+					isPreferredTrackAvailable = false;
+					break;
+				}
+			}
+			
+			if (isPreferredTrackAvailable)
+			{
+				trackIndex = preferredTrackIndex;
+			}
+			else
+			{
+				// 首选轨道已被占用，分配到其他可用轨道
+				var eventsAtTime:Int = 0;
+				for (existingEvent in events)
+				{
+					if (Math.abs(existingEvent.strumTime - daStrumTime) < 0.0001)
+					{
+						eventsAtTime++;
+					}
+				}
+				trackIndex = eventsAtTime % EVENT_TRACK_COUNT;
+			}
+		}
+		else
+		{
+			// 没有指定首选轨道，按原有逻辑分配
+			var eventsAtTime:Int = 0;
+			for (existingEvent in events)
+			{
+				if (Math.abs(existingEvent.strumTime - daStrumTime) < 0.0001)
+				{
+					eventsAtTime++;
+				}
+			}
+			trackIndex = eventsAtTime % EVENT_TRACK_COUNT;
+		}
+
+		var swagEvent:EventMetaNote = new EventMetaNote(daStrumTime, event, trackIndex);
+		swagEvent.scrollFactor.x = 0;
+		swagEvent.active = false;
+
+		var secNum:Int = 0;
+		for (i in 1...cachedSectionTimes.length)
+		{
+			if(cachedSectionTimes[i] > daStrumTime) break;
+			secNum++;
+		}
+		positionNoteYOnTime(swagEvent, secNum);
+		positionEventOnTrack(swagEvent, trackIndex);
+		return swagEvent;
+	}
+
+	function positionEventOnTrack(event:EventMetaNote, trackIndex:Int)
+	{
+		// 轨道布局：对手(0-3) → Event(4-7) → 玩家(8-11)
+		// Event轨道的起始偏移：GRID_COLUMNS_PER_PLAYER（对手4列）+ TRACK_SPACING
+		var eventTrackOffset:Int = GRID_COLUMNS_PER_PLAYER;
+		var gridLayout = getGridLayout();
+
+		var eventX:Float = gridLayout.startX + (GRID_SIZE - event.width) / 2;
+		eventX += GRID_SIZE * eventTrackOffset;
+		eventX += TRACK_SPACING; // Event轨道的间距偏移
+		eventX += GRID_SIZE * trackIndex;
+		event.x = eventX;
+		event.eventText.x = event.x - event.eventText.width - 10;
+	}
+
+	function _cacheSections()
+	{
+		var time:Float = 0;
+		var row:Int = 0;
+		cachedSectionRow = [];
+		cachedSectionTimes = [];
+		cachedSectionCrochets = [];
+		cachedSectionBPMs = [];
+
+		if(PlayState.SONG == null)
+		{
+			cachedSectionRow.push(0);
+			cachedSectionTimes.push(0);
+			cachedSectionCrochets.push(0);
+			cachedSectionBPMs.push(0);
+			return;
+		}
+
+		var bpm:Float = PlayState.SONG.bpm;
+		var reachedLimit:Bool = false;
+		for (secNum => section in PlayState.SONG.notes)
+		{
+			var secs:Null<Float> = cast section.sectionBeats;
+			if(secs == null || Math.isNaN(secs) || secs <= 0) section.sectionBeats = 4;
+	
+			if(section.changeBPM) bpm = section.bpm;
+			var beat:Float = Conductor.calculateCrochet(bpm);
+			//trace(secBPM, beat);
+			
+			cachedSectionRow.push(row);
+			cachedSectionTimes.push(time);
+			cachedSectionCrochets.push(beat);
+			cachedSectionBPMs.push(bpm);
+
+			var lastTime:Float = time;
+			var rowRound:Int = Math.round(4 * section.sectionBeats);
+			row += rowRound;
+			time += beat * (rowRound / 4);
+
+			for (note in section.sectionNotes)
+			{
+				if(secNum > 0 && note[0] < lastTime) note[0] = lastTime;
+				else if(secNum < PlayState.SONG.notes.length && note[0] >= time - 0.000001) note[0] = time - 0.000001;
+			}
+
+			if(FlxG.sound.music != null && time >= FlxG.sound.music.length)
+			{
+				var lastSectionNum:Int = PlayState.SONG.notes.length - 1;
+				if(secNum < lastSectionNum) //Delete extra sections
+				{
+					while(PlayState.SONG.notes.length - 1 > secNum)
+					{
+						PlayState.SONG.notes.pop();
+					}
+	
+					trace('breaking at section $secNum');
+					reachedLimit = true;
+					break;
+				}
+				else if(secNum == lastSectionNum)
+				{
+					trace('reached limit at section $secNum');
+					reachedLimit = true;
+				}
+			}
+		}
+
+		if(FlxG.sound.music != null && !reachedLimit) //Created sections to fill blank space
+		{
+			var lastSection = PlayState.SONG.notes[PlayState.SONG.notes.length-1];
+			var beat:Float = Conductor.calculateCrochet(bpm);
+			var sectionBeats:Float = lastSection != null ? lastSection.sectionBeats : 4;
+			var rowRound:Int = Math.round(4 * sectionBeats);
+			var timeAdd:Float = beat * (rowRound / 4);
+			var mustHitSec:Bool = lastSection != null ? lastSection.mustHitSection : true;
+			var changeBpmSec:Bool = lastSection != null ? lastSection.changeBPM : false;
+			var altAnimSec:Bool = lastSection != null ? lastSection.altAnim : false;
+			var gfSec:Bool = lastSection != null ? lastSection.gfSection : false;
+
+			while(!reachedLimit)
+			{
+				PlayState.SONG.notes.push({
+					sectionNotes: [],
+					sectionBeats: sectionBeats,
+					mustHitSection: mustHitSec,
+					bpm: bpm,
+					changeBPM: changeBpmSec,
+					altAnim: altAnimSec,
+					gfSection: gfSec
+				});
+
+				cachedSectionRow.push(row);
+				cachedSectionTimes.push(time);
+				cachedSectionCrochets.push(beat);
+				cachedSectionBPMs.push(bpm);
+
+				row += rowRound;
+				time += timeAdd;
+
+				if(time >= FlxG.sound.music.length)
+				{
+					trace('created sections until ${PlayState.SONG.notes.length-1}');
+					reachedLimit = true;
+				}
+			}
+		}
+		cachedSectionRow.push(row);
+		cachedSectionTimes.push(time);
+	}
+
+	var showPreviousSection:Bool = true;
+	var showNextSection:Bool = true;
+	var showNoteTypeLabels:Bool = true;
+	var forceDataUpdate:Bool = true;
+	function loadSection(?sec:Null<Int> = null)
+	{
+		if(sec != null) curSec = sec;
+		curSec = Std.int(FlxMath.bound(curSec, 0, PlayState.SONG.notes.length-1));
+		Conductor.bpm = cachedSectionBPMs[curSec];
+
+		var hei:Float = 0;
+
+		// 更新对手轨道网格
+		if(curSec > 0)
+		{
+			prevOpponentGridBg.y = cachedSectionRow[curSec-1] * GRID_SIZE * curZoom;
+			prevOpponentGridBg.rows = 4 * PlayState.SONG.notes[curSec-1].sectionBeats * curZoom;
+			prevOpponentGridBg.visible = showPreviousSection;
+			hei += prevOpponentGridBg.height;
+			eventLockOverlay.y = prevOpponentGridBg.y;
+		}
+		else prevOpponentGridBg.visible = false;
+
+		if(curSec < PlayState.SONG.notes.length - 1)
+		{
+			nextOpponentGridBg.y = cachedSectionRow[curSec+1] * GRID_SIZE * curZoom;
+			nextOpponentGridBg.rows = 4 * PlayState.SONG.notes[curSec+1].sectionBeats * curZoom;
+			nextOpponentGridBg.visible = showNextSection;
+			hei += nextOpponentGridBg.height;
+		}
+		else nextOpponentGridBg.visible = false;
+
+		opponentGridBg.y = cachedSectionRow[curSec] * GRID_SIZE * curZoom;
+		opponentGridBg.rows = 4 * PlayState.SONG.notes[curSec].sectionBeats * curZoom;
+		hei += opponentGridBg.height;
+
+		// 更新Event轨道网格
+		if(SHOW_EVENT_COLUMN)
+		{
+			if(curSec > 0)
+			{
+				prevEventGridBg.y = cachedSectionRow[curSec-1] * GRID_SIZE * curZoom;
+				prevEventGridBg.rows = 4 * PlayState.SONG.notes[curSec-1].sectionBeats * curZoom;
+				prevEventGridBg.visible = showPreviousSection;
+			}
+			else prevEventGridBg.visible = false;
+
+			if(curSec < PlayState.SONG.notes.length - 1)
+			{
+				nextEventGridBg.y = cachedSectionRow[curSec+1] * GRID_SIZE * curZoom;
+				nextEventGridBg.rows = 4 * PlayState.SONG.notes[curSec+1].sectionBeats * curZoom;
+				nextEventGridBg.visible = showNextSection;
+			}
+			else nextEventGridBg.visible = false;
+
+			eventGridBg.y = cachedSectionRow[curSec] * GRID_SIZE * curZoom;
+			eventGridBg.rows = 4 * PlayState.SONG.notes[curSec].sectionBeats * curZoom;
+		}
+
+		// 更新玩家轨道网格
+		if(curSec > 0)
+		{
+			prevPlayerGridBg.y = cachedSectionRow[curSec-1] * GRID_SIZE * curZoom;
+			prevPlayerGridBg.rows = 4 * PlayState.SONG.notes[curSec-1].sectionBeats * curZoom;
+			prevPlayerGridBg.visible = showPreviousSection;
+		}
+		else prevPlayerGridBg.visible = false;
+
+		if(curSec < PlayState.SONG.notes.length - 1)
+		{
+			nextPlayerGridBg.y = cachedSectionRow[curSec+1] * GRID_SIZE * curZoom;
+			nextPlayerGridBg.rows = 4 * PlayState.SONG.notes[curSec+1].sectionBeats * curZoom;
+			nextPlayerGridBg.visible = showNextSection;
+		}
+		else nextPlayerGridBg.visible = false;
+
+		playerGridBg.y = cachedSectionRow[curSec] * GRID_SIZE * curZoom;
+		playerGridBg.rows = 4 * PlayState.SONG.notes[curSec].sectionBeats * curZoom;
+
+		// 更新轨道颜色覆盖层的位置和高度
+		var gridLayout = getGridLayout();
+		var gridY:Float = 0;
+		var extraHeight:Int = 500;
+		
+		if(playerTrackOverlay != null && opponentTrackOverlay != null)
+		{
+			opponentTrackOverlay.x = gridLayout.opponentX;
+			opponentTrackOverlay.y = gridY;
+			opponentTrackOverlay.height = Std.int(opponentGridBg.height) + extraHeight;
+			
+			playerTrackOverlay.x = gridLayout.playerX;
+			playerTrackOverlay.y = gridY;
+			playerTrackOverlay.height = Std.int(opponentGridBg.height) + extraHeight;
+			
+			if(eventTrackOverlay != null)
+			{
+				eventTrackOverlay.x = gridLayout.eventX;
+				eventTrackOverlay.y = gridY;
+				eventTrackOverlay.height = Std.int(opponentGridBg.height) + extraHeight;
+			}
+		}
+		
+		// 更新轨道分隔线的位置和高度
+		if(SHOW_EVENT_COLUMN && trackSeparators.length >= 2)
+		{
+			trackSeparators[0].x = gridLayout.opponentX + GRID_SIZE * GRID_COLUMNS_PER_PLAYER + TRACK_SPACING / 2 - 2;
+			trackSeparators[0].y = gridY;
+			trackSeparators[0].height = Std.int(opponentGridBg.height) + extraHeight;
+			
+			trackSeparators[1].x = gridLayout.eventX + GRID_SIZE * EVENT_TRACK_COUNT + TRACK_SPACING / 2 - 2;
+			trackSeparators[1].y = gridY;
+			trackSeparators[1].height = Std.int(opponentGridBg.height) + extraHeight;
+		}
+
+		if(!prevOpponentGridBg.visible) eventLockOverlay.y = opponentGridBg.y;
+		eventLockOverlay.scale.y = hei;
+		// 更新事件锁定覆盖层的X位置，确保它始终在Event轨道上
+		eventLockOverlay.x = SHOW_EVENT_COLUMN ? gridLayout.eventX : gridLayout.opponentX;
+		eventLockOverlay.updateHitbox();
+
+		softReloadNotes();
+		updateHeads();
+
+		var sec = getCurChartSection();
+		if(sec != null)
+		{
+			mustHitCheckBox.checked = sec.mustHitSection;
+			gfSectionCheckBox.checked = sec.gfSection;
+			altAnimSectionCheckBox.checked = sec.altAnim;
+			changeBpmCheckBox.checked = sec.changeBPM;
+			changeBpmStepper.value = Conductor.bpm;
+			beatsPerSecStepper.value = sec.sectionBeats;
+
+			strumTimeStepper.step = Conductor.stepCrochet;
+			susLengthStepper.step = cachedSectionCrochets[curSec] / 4 / 2;
+			susLengthStepper.max = susLengthStepper.step * 128;
+			if(selectedNotes.length > 1) susLengthStepper.min = -susLengthStepper.max;
+			else susLengthStepper.min = 0;
+		}
+		opponentGridBg.vortexLineEnabled = playerGridBg.vortexLineEnabled = vortexEnabled;
+		prevOpponentGridBg.vortexLineEnabled = prevPlayerGridBg.vortexLineEnabled = vortexEnabled;
+		nextOpponentGridBg.vortexLineEnabled = nextPlayerGridBg.vortexLineEnabled = vortexEnabled;
+		opponentGridBg.vortexLineSpace = playerGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+		prevOpponentGridBg.vortexLineSpace = prevPlayerGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+		nextOpponentGridBg.vortexLineSpace = nextPlayerGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+
+		if(SHOW_EVENT_COLUMN)
+		{
+			eventGridBg.vortexLineEnabled = vortexEnabled;
+			prevEventGridBg.vortexLineEnabled = vortexEnabled;
+			nextEventGridBg.vortexLineEnabled = vortexEnabled;
+			eventGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+			prevEventGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+			nextEventGridBg.vortexLineSpace = GRID_SIZE * 4 * curZoom;
+		}
+
+		updateWaveform();
+	}
+
+	function softReloadNotes(onlyCurrent:Bool = false)
+	{
+		if(!onlyCurrent) behindRenderedNotes.clear();
+		curRenderedNotes.clear();
+
+		var minTime:Float = getMinNoteTime(curSec);
+		var maxTime:Float = getMaxNoteTime(curSec);
+		function curSecFilter(note:MetaNote)
+		{
+			return (note.strumTime >= minTime && note.strumTime < maxTime);
+		}
+
+		// 优化模式：先创建需要的 MetaNote
+		if (ClientPrefs.data.useOptimizedNoteLoading)
+		{
+			var secToCheck = [curSec];
+			if (!onlyCurrent && (showPreviousSection || showNextSection))
+			{
+				if (showPreviousSection && curSec > 0) secToCheck.push(curSec - 1);
+				if (showNextSection && curSec < PlayState.SONG.notes.length - 1) secToCheck.push(curSec + 1);
+			}
+
+			for (i in 0...preloadedNoteData.length)
+			{
+				var secForNote = preloadedSecNum[i];
+				var shouldCreate = false;
+				for (s in secToCheck)
+				{
+					if (secForNote == s)
+					{
+						shouldCreate = true;
+						break;
+					}
+				}
+
+				if (shouldCreate && preloadedMetaNotes[i] == null)
+				{
+					// 创建 MetaNote
+					var newNote = createNote(preloadedNoteData[i], secForNote);
+					preloadedMetaNotes[i] = newNote;
+					notes.push(newNote);
+				}
+			}
+			
+			notes.sort(PlayState.sortByTime);
+		}
+
+		var firstNote:Bool = false;
+		var firstEvent:Bool = false;
+		sectionFirstNoteID = 0;
+		sectionFirstEventID = 0;
+		for (num => note in notes)
+		{
+			if(note != null && curSecFilter(note))
+			{
+				if(!firstNote) sectionFirstNoteID = num;
+				curRenderedNotes.add(note);
+				note.alpha = (note.strumTime >= Conductor.songPosition) ? 1 : 0.6;
+				if(note.hasSustain) note.updateSustainToZoom(cachedSectionCrochets[curSec] / 4, curZoom);
+			}
+		}
+
+		if(SHOW_EVENT_COLUMN)
+		{
+			for (num => event in events)
+			{
+				if(event != null && curSecFilter(event))
+				{
+					if(!firstEvent) sectionFirstEventID = num;
+					curRenderedNotes.add(event);
+					event.alpha = (event.strumTime >= Conductor.songPosition) ? 1 : 0.6;
+					event.eventText.visible = true;
+				}
+			}
+		}
+
+		if(!onlyCurrent)
+		{
+			if(showPreviousSection || showNextSection)
+			{
+				var prevMinTime:Float = getMinNoteTime(curSec-1);
+				var prevMaxTime:Float = getMaxNoteTime(curSec-1);
+				var nextMinTime:Float = getMinNoteTime(curSec+1);
+				var nextMaxTime:Float = getMaxNoteTime(curSec+1);
+				function otherSecFilter(note:MetaNote)
+				{
+					return (prevOpponentGridBg.visible && (note.strumTime >= prevMinTime && note.strumTime < prevMaxTime)) ||
+						(nextOpponentGridBg.visible && (note.strumTime >= nextMinTime && note.strumTime < nextMaxTime));
+				}
+	
+				for(note in notes.filter(otherSecFilter))
+				{
+					behindRenderedNotes.add(note);
+					note.alpha = 0.4;
+					if(note.hasSustain) note.updateSustainToZoom(cachedSectionCrochets[curSec] / 4, curZoom);
+				}
+
+				if(SHOW_EVENT_COLUMN)
+				{
+					for(event in events.filter(otherSecFilter))
+					{
+						behindRenderedNotes.add(event);
+						event.alpha = 0.4;
+						event.eventText.visible = false;
+					}
+				}
+			}
+		}
+	}
+
+	function getMinNoteTime(sec:Int)
+	{
+		var minTime:Float = Math.NEGATIVE_INFINITY;
+		if(sec > 0)
+			minTime = cachedSectionTimes[sec];
+		return minTime;
+	}
+
+	function getMaxNoteTime(sec:Int)
+	{
+		var maxTime:Float = Math.POSITIVE_INFINITY;
+		if(sec < cachedSectionTimes.length)
+			maxTime = cachedSectionTimes[sec + 1];
+		return maxTime;
+	}
+
+	function uiColumnToNoteData(uiColumn:Int):Int
+	{
+		// 新布局：对手(0-3) → Event(4-7) → 玩家(8-11)
+		if (uiColumn < 4)
+		{
+			return uiColumn + 4; // 对手轨道（noteData 4-7）
+		}
+		else if (uiColumn < 8 && SHOW_EVENT_COLUMN)
+		{
+			return -1; // Event轨道（noteData -1，通过eventTrackIndex区分）
+		}
+		else
+		{
+			return uiColumn - 8; // 玩家轨道（noteData 0-3）
+		}
+	}
+
+	function noteDataToUIColumn(noteData:Int):Int
+	{
+		// 新布局：对手(0-3) → Event(4-7) → 玩家(8-11)
+		if (noteData >= 4 && noteData < 8)
+		{
+			return noteData - 4; // 对手轨道（UI列0-3）
+		}
+		else if (noteData < 0 && SHOW_EVENT_COLUMN)
+		{
+			return GRID_COLUMNS_PER_PLAYER; // Event轨道（UI列4-7，这里返回起始位置，具体位置由eventTrackIndex决定）
+		}
+		else
+		{
+			return noteData + GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT; // 玩家轨道（UI列8-11）
+		}
+	}
+
+	function positionNoteXByData(note:MetaNote, ?data:Null<Int> = null)
+	{
+		if(data == null) data = note.songData[1];
+		var gridLayout = getGridLayout();
+
+		var noteX:Float = gridLayout.startX + (GRID_SIZE - note.width) / 2;
+
+		// 区分event和普通note，使用不同的轨道布局
+		if (note.isEvent)
+		{
+			// Event使用专用方法，根据eventTrackIndex定位
+			var eventNote:EventMetaNote = cast note;
+			positionEventOnTrack(eventNote, eventNote.eventTrackIndex);
+			return;
+		}
+
+		// 普通note的轨道布局：对手(0-3) → Event(4-7) → 玩家(8-11)
+		// noteData映射：
+		// 4-7（对手）→ UI列0-3
+		// 0-3（玩家）→ UI列8-11
+		var uiColumn:Int = 0;
+		if (data >= 4)
+		{
+			// 对手轨道（noteData 4-7）
+			uiColumn = data - 4;
+		}
+		else
+		{
+			// 玩家轨道（noteData 0-3）
+			uiColumn = data + GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT;
+		}
+
+		// 根据逻辑列号计算额外的间距偏移
+		var spacingOffset:Float = 0;
+		if (uiColumn >= GRID_COLUMNS_PER_PLAYER)
+		{
+			spacingOffset += TRACK_SPACING; // Event轨道后的间距
+		}
+		if (uiColumn >= GRID_COLUMNS_PER_PLAYER + EVENT_TRACK_COUNT)
+		{
+			spacingOffset += TRACK_SPACING; // 玩家轨道前的间距
+		}
+
+		noteX += GRID_SIZE * uiColumn + spacingOffset;
+		note.x = noteX;
+		//trace(gridLayout.startX, noteX);
+	}
+
+	function positionNoteYOnTime(note:MetaNote, section:Int)
+	{
+		var time:Float = note.strumTime - cachedSectionTimes[section];
+		var noteY:Float = (time / cachedSectionCrochets[section]) * GRID_SIZE * 4 * curZoom;
+		noteY += cachedSectionRow[section] * GRID_SIZE * curZoom;
+		noteY = Math.max(noteY, -150);
+		note.y = noteY + (GRID_SIZE/2 - note.height/2);
+		note.chartY = noteY;
+		//trace(gridBg.y, noteY);
+	}
+
+	var characterData:Dynamic = {};
+	function updateJsonData():Void
+	{
+		for (i in 1...GRID_PLAYERS+1)
+		{
+			//trace('adding iconP$i');
+			var charName:String = Reflect.field(PlayState.SONG, 'player$i');
+			trace('updateJsonData - player$i: charName=$charName');
+			var data:CharacterFile = loadCharacterFile(charName);
+			trace('updateJsonData - player$i: data=${data != null ? "loaded" : "null"}, vocals_file=${data != null ? data.vocals_file : "N/A"}');
+			Reflect.setField(characterData, 'iconP$i', data != null && data.healthicon != null ? data.healthicon : 'face');
+			var vocalName:String = data != null && data.vocals_file != null && data.vocals_file.length > 0 ? data.vocals_file : charName;
+			trace('updateJsonData - player$i: vocalName=$vocalName');
+			Reflect.setField(characterData, 'vocalsP$i', vocalName);
+		}
+	}
+	
+	var _lastSec:Int = -1;
+	var _lastGfSection:Null<Bool> = null;
+	var _lastMustHitSection:Null<Bool> = null; // 记录上一次的mustHitSection状态
+	function updateHeads(ignoreCheck:Bool = false):Void
+	{
+		var curSecData:SwagSection = PlayState.SONG.notes[curSec];
+		var isGfSection:Bool = (curSecData != null && curSecData.gfSection == true);
+		var mustHitSection:Bool = (curSecData != null && curSecData.mustHitSection == true);
+		
+		// 提前更新mustHitSection状态，确保动画逻辑能正确判断
+		var mustHitChanged:Bool = (_lastMustHitSection != mustHitSection);
+		_lastMustHitSection = mustHitSection;
+		
+		if(_lastGfSection == isGfSection && _lastSec == curSec && !ignoreCheck) return; //optimization
+
+for (i in 0...GRID_PLAYERS)
+	{
+		var icon:HealthIcon = icons[i];
+		//trace('changing iconP${icon.ID}');
+		var iconName:String = Reflect.field(characterData, 'iconP${icon.ID}');
+		
+		// GF Section特殊处理：根据mustHitSection决定哪个图标显示GF
+		if (isGfSection)
+		{
+			var gfChar:String = (PlayState.SONG.gfVersion != null && PlayState.SONG.gfVersion.length > 0) ? PlayState.SONG.gfVersion : 'gf';
+			var gfData:CharacterFile = loadCharacterFile(gfChar);
+			var gfIcon:String = (gfData != null && gfData.healthicon != null && gfData.healthicon.length > 0) ? gfData.healthicon : 'face';
+			if (mustHitSection && i == 0) // 玩家位且GF在玩家位
+			{
+				icon.changeIcon(gfIcon);
+			}
+			else if (!mustHitSection && i == 1) // 对手位且GF在对手位
+			{
+				icon.changeIcon(gfIcon);
+			}
+			else
+			{
+				icon.changeIcon(iconName); // 恢复角色图标
+			}
+		}
+		else
+		{
+			icon.changeIcon(iconName); // 非GF Section，正常显示角色图标
+		}
+	}
+
+	if(icons.length > 1)
+	{
+		var iconP1:HealthIcon = icons[0]; // 对手图标
+		var iconP2:HealthIcon = icons[1]; // 玩家图标
+		var mustHitSection:Bool = (curSecData != null && curSecData.mustHitSection == true);
+
+		// GF Section时的颜色调整（新布局：对手和玩家轨道）
+		if (isGfSection)
+		{
+			if (mustHitSection)
+			{
+				// 同时启用：mustHitSec + gfSection，GF在玩家位
+				// 玩家轨道改为浅红色，对手保持浅紫色
+				if(playerTrackOverlay != null) playerTrackOverlay.color = 0xFFFF8888; // 浅红色
+				// 对手保持浅紫色（不更改）
+			}
+			else
+			{
+				// 仅启用gfSection（mustHitSec禁用），GF在对手位
+				// 对手轨道改为浅红色，玩家保持浅紫色
+				if(opponentTrackOverlay != null) opponentTrackOverlay.color = 0xFFFF8888; // 浅红色
+				// 玩家保持浅紫色（不更改）
+			}
+		}
+		else
+		{
+			// 非GF Section，恢复默认颜色：对手浅红，玩家浅蓝
+			if(playerTrackOverlay != null) playerTrackOverlay.color = 0xFF88CCFF; // 浅蓝色
+			if(opponentTrackOverlay != null) opponentTrackOverlay.color = 0xFFCC88FF; // 浅紫色
+		}
+			// 只在mustHitSection状态改变时执行Tween动画（使用之前记录的mustHitChanged）
+			// 修复后：交换iconP1和iconP2的目标，匹配图标显示位置
+			if (mustHitChanged && mustHitTweenEnabled)
+			{
+				if (mustHitSection)
+				{
+					// 指示器移动到玩家图标（现在对应iconP1的显示位置）
+					FlxTween.cancelTweensOf(mustHitIndicator);
+					FlxTween.tween(mustHitIndicator, {x: iconP1.x + iconP1.width / 2}, 0.3, {ease: FlxEase.backOut});
+				}
+				else
+				{
+					// 指示器移动到对手图标（现在对应iconP2的显示位置）
+					FlxTween.cancelTweensOf(mustHitIndicator);
+					FlxTween.tween(mustHitIndicator, {x: iconP2.x + iconP2.width / 2}, 0.3, {ease: FlxEase.backOut});
+				}
+			}
+		}
+		_lastGfSection = isGfSection;
+		_lastSec = curSec;
+	}
+
+	var playbackSlider:PsychUISlider;
+
+	var mouseSnapCheckBox:PsychUICheckBox;
+	var ignoreProgressCheckBox:PsychUICheckBox;
+	var hitsoundPlayerStepper:PsychUINumericStepper;
+	var hitsoundOpponentStepper:PsychUINumericStepper;
+	var metronomeStepper:PsychUINumericStepper;
+
+	var instVolumeStepper:PsychUINumericStepper;
+	var instMuteCheckBox:PsychUICheckBox;
+	var playerVolumeStepper:PsychUINumericStepper;
+	var playerMuteCheckBox:PsychUICheckBox;
+	var opponentVolumeStepper:PsychUINumericStepper;
+	var opponentMuteCheckBox:PsychUICheckBox;
+
+	var dragCharactersCheckBox:PsychUICheckBox;
+	var showHitboxCheckBox:PsychUICheckBox;
+	function addChartingTab()
+	{
+		var tab_group = mainBox.getTab(Language.get('charting_charting_text')).menu;
+		var objX = 10;
+		var objY = 10;
+
+		var txt = new FlxText(objX, objY, 280, Language.get('charting_charting_tip'), Std.parseInt(Language.get('charting_font_size')));
+		txt.font = Language.get('uitab_font');
+		txt.alignment = CENTER;
+		tab_group.add(txt);
+
+		objY += 25;
+		playbackSlider = new PsychUISlider(50, objY, function(v:Float) setPitch(playbackRate = v), 1, 0.1, 5.0, 200);
+		playbackSlider.label = Language.get('charting_playback_text');
+		
+		objY += 60;
+		mouseSnapCheckBox = new PsychUICheckBox(objX, objY, Language.get('charting_mousescrsnap_text'), 100, function() chartEditorSave.data.mouseScrollSnap = mouseSnapCheckBox.checked);
+		mouseSnapCheckBox.checked = chartEditorSave.data.mouseScrollSnap;
+
+		ignoreProgressCheckBox = new PsychUICheckBox(objX + 150, objY, Language.get('charting_ignwarning_text'), 100, function() chartEditorSave.data.ignoreProgressWarns = ignoreProgressCheckBox.checked);
+		ignoreProgressCheckBox.checked = chartEditorSave.data.ignoreProgressWarns;
+
+		objY += 50;
+		hitsoundPlayerStepper = new PsychUINumericStepper(objX, objY, 0.2, 0, 0, 1, 1);
+		hitsoundOpponentStepper = new PsychUINumericStepper(objX + 100, objY, 0.2, 0, 0, 1, 1);
+		metronomeStepper = new PsychUINumericStepper(objX + 200, objY, 0.2, 0, 0, 1, 1);
+
+		objY += 50;
+		instVolumeStepper = new PsychUINumericStepper(objX, objY, 0.1, 0.6, 0, 1, 1);
+		instVolumeStepper.onValueChange = updateAudioVolume;
+		playerVolumeStepper = new PsychUINumericStepper(objX + 100, objY, 0.1, 1, 0, 1, 1);
+		playerVolumeStepper.onValueChange = updateAudioVolume;
+		opponentVolumeStepper = new PsychUINumericStepper(objX + 200, objY, 0.1, 1, 0, 1, 1);
+		opponentVolumeStepper.onValueChange = updateAudioVolume;
+
+		objY += 25;
+		instMuteCheckBox = new PsychUICheckBox(objX, objY, Language.get('charting_mute_text'), 60, updateAudioVolume);
+		playerMuteCheckBox = new PsychUICheckBox(objX + 100, objY, Language.get('charting_mute_text'), 60, updateAudioVolume);
+		opponentMuteCheckBox = new PsychUICheckBox(objX + 200, objY, Language.get('charting_mute_text'), 60, updateAudioVolume);
+
+		objY += 50;
+		dragCharactersCheckBox = new PsychUICheckBox(objX, objY, '允许拖动角色', 120, function() chartEditorSave.data.allowDragCharacters = dragCharactersCheckBox.checked);
+		if(chartEditorSave.data.allowDragCharacters == null) chartEditorSave.data.allowDragCharacters = false;
+		dragCharactersCheckBox.checked = chartEditorSave.data.allowDragCharacters;
+
+		showHitboxCheckBox = new PsychUICheckBox(objX + 150, objY, '显示碰撞箱', 120, function() chartEditorSave.data.showCharacterHitboxes = showHitboxCheckBox.checked);
+		if(chartEditorSave.data.showCharacterHitboxes == null) chartEditorSave.data.showCharacterHitboxes = false;
+		showHitboxCheckBox.checked = chartEditorSave.data.showCharacterHitboxes;
+
+		showDragRangeCheckBox = new PsychUICheckBox(objX + 300, objY, '显示拖动范围', 120, function() chartEditorSave.data.showCharacterDragRange = showDragRangeCheckBox.checked);
+		if(chartEditorSave.data.showCharacterDragRange == null) chartEditorSave.data.showCharacterDragRange = false;
+		showDragRangeCheckBox.checked = chartEditorSave.data.showCharacterDragRange;
+
+		tab_group.add(playbackSlider);
+		tab_group.add(mouseSnapCheckBox);
+		tab_group.add(ignoreProgressCheckBox);
+
+		tab_group.add(new FlxText(hitsoundPlayerStepper.x, hitsoundPlayerStepper.y - 15, 100, Language.get('charting_playersoundhit_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(hitsoundOpponentStepper.x, hitsoundOpponentStepper.y - 15, 100, Language.get('charting_opposoundhit_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(metronomeStepper.x, metronomeStepper.y - 15, 100, Language.get('charting_metronome_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(hitsoundPlayerStepper);
+		tab_group.add(hitsoundOpponentStepper);
+		tab_group.add(metronomeStepper);
+		
+		tab_group.add(new FlxText(instVolumeStepper.x, instVolumeStepper.y - 15, 100, Language.get('charting_instvol_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(playerVolumeStepper.x, playerVolumeStepper.y - 15, 100, Language.get('charting_playervol_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(opponentVolumeStepper.x, opponentVolumeStepper.y - 15, 100, Language.get('charting_oppovol_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(instVolumeStepper);
+		tab_group.add(instMuteCheckBox);
+		tab_group.add(playerVolumeStepper);
+		tab_group.add(playerMuteCheckBox);
+		tab_group.add(opponentVolumeStepper);
+		tab_group.add(opponentMuteCheckBox);
+
+		tab_group.add(dragCharactersCheckBox);
+		tab_group.add(showHitboxCheckBox);
+		tab_group.add(showDragRangeCheckBox);
+	}
+
+	var gameOverCharDropDown:PsychUIDropDownMenu;
+	var gameOverSndInputText:PsychUIInputText;
+	var gameOverLoopInputText:PsychUIInputText;
+	var gameOverRetryInputText:PsychUIInputText;
+	var noRGBCheckBox:PsychUICheckBox;
+	var noteTextureInputText:PsychUIInputText;
+	var noteSplashesInputText:PsychUIInputText;
+	function addDataTab()
+	{
+		var tab_group = mainBox.getTab(Language.get('charting_data_text')).menu;
+		var objX = 10;
+		var objY = 25;
+		gameOverCharDropDown = new PsychUIDropDownMenu(objX, objY, [''], function(id:Int, character:String)
+		{
+			PlayState.SONG.gameOverChar = character;
+			if(character.length < 1) Reflect.deleteField(PlayState.SONG, 'gameOverChar');
+			trace('selected $character');
+		});
+
+		objY += 40;
+		gameOverSndInputText = new PsychUIInputText(objX, objY, 120, '', 8);
+		gameOverSndInputText.onChange = function(old:String, cur:String)
+		{
+			PlayState.SONG.gameOverSound = cur;
+			if(cur.trim().length < 1) Reflect.deleteField(PlayState.SONG, 'gameOverSound');
+		}
+		objY += 40;
+		gameOverLoopInputText = new PsychUIInputText(objX, objY, 120, '', 8);
+		gameOverLoopInputText.onChange = function(old:String, cur:String)
+		{
+			PlayState.SONG.gameOverLoop = cur;
+			if(cur.trim().length < 1) Reflect.deleteField(PlayState.SONG, 'gameOverLoop');
+		}
+		objY += 40;
+		gameOverRetryInputText = new PsychUIInputText(objX, objY, 120, '', 8);
+		gameOverRetryInputText.onChange = function(old:String, cur:String)
+		{
+			PlayState.SONG.gameOverEnd = cur;
+			if(cur.trim().length < 1) Reflect.deleteField(PlayState.SONG, 'gameOverEnd');
+		}
+
+		objY += 35;
+		noRGBCheckBox = new PsychUICheckBox(objX, objY, Language.get('charting_disRGB_text'), 100, updateNotesRGB);
+		
+		objY += 40;
+		noteTextureInputText = new PsychUIInputText(objX, objY, 120, '');
+		noteTextureInputText.unfocus = function()
+		{
+			var changed:Bool = false;
+			if(PlayState.SONG.arrowSkin != noteTextureInputText.text) changed = true;
+			PlayState.SONG.arrowSkin = noteTextureInputText.text.trim();
+			if(PlayState.SONG.arrowSkin.trim().length < 1) PlayState.SONG.arrowSkin = null;
+
+			if(changed)
+			{
+				var textureLoad:String = 'images/${noteTextureInputText.text}.png';
+				if(Paths.fileExists(textureLoad, IMAGE) || noteTextureInputText.text.trim() == '')
+				{
+					for (note in notes)
+					{
+						if(note == null) continue;
+						note.reloadNote(note.texture);
+		
+						if(note.width > note.height)
+							note.setGraphicSize(GRID_SIZE);
+						else
+							note.setGraphicSize(0, GRID_SIZE);
+		
+						note.updateHitbox();
+					}
+					if(noteTextureInputText.text.trim().length > 0) showOutput('Reloaded notes to: "$textureLoad"');
+					else showOutput('Reloaded notes to default texture');
+					
+				}
+				else showOutput('ERROR: "$textureLoad" not found.', true);
+			}
+		};
+
+		noteSplashesInputText = new PsychUIInputText(objX + 140, objY, 120, '');
+		noteSplashesInputText.onChange = function(old:String, cur:String)
+		{
+			PlayState.SONG.splashSkin = cur;
+			if(cur.trim().length < 1) PlayState.SONG.splashSkin = null;
+		}
+	
+		tab_group.add(new FlxText(gameOverCharDropDown.x, gameOverCharDropDown.y - 15, 120, 'Game Over Character:'));
+		tab_group.add(new FlxText(gameOverSndInputText.x, gameOverSndInputText.y - 15, 180, 'Game Over Death Sound (sounds/):'));
+		tab_group.add(new FlxText(gameOverLoopInputText.x, gameOverLoopInputText.y - 15, 180, 'Game Over Loop Music (music/):'));
+		tab_group.add(new FlxText(gameOverRetryInputText.x, gameOverRetryInputText.y - 15, 180, 'Game Over Retry Music (music/):'));
+		tab_group.add(gameOverSndInputText);
+		tab_group.add(gameOverLoopInputText);
+		tab_group.add(gameOverRetryInputText);
+		tab_group.add(noRGBCheckBox);
+
+		tab_group.add(new FlxText(noteTextureInputText.x, noteTextureInputText.y - 15, 100, 'Note Texture:'));
+		tab_group.add(new FlxText(noteSplashesInputText.x, noteSplashesInputText.y - 15, 120, 'Note Splashes Texture:'));
+		tab_group.add(noteTextureInputText);
+		tab_group.add(noteSplashesInputText);
+
+		tab_group.add(gameOverCharDropDown); //lowest priority to display properly
+	}
+
+	var eventDropDown:PsychUIDropDownMenu;
+	var value1InputText:PsychUIInputText;
+	var value2InputText:PsychUIInputText;
+	var value3InputText:PsychUIInputText;
+	var value4InputText:PsychUIInputText;
+	var selectedEventText:FlxText;
+	var eventDescriptionText:FlxText;
+
+	var eventsList:Array<Array<String>>;
+	var curEventSelected:Int = 0;
+	function addEventsTab()
+	{
+		var tab_group = mainBox.getTab(Language.get('charting_events_text')).menu;
+		var objX = 10;
+		var objY = 25;
+
+		eventDropDown = new PsychUIDropDownMenu(objX, objY, [], function(id:Int, character:String)
+		{
+			var eventSelected:Array<String> = eventsList[id];
+			var eventName:String = eventSelected[0];
+			var description:String = eventSelected[1];
+			eventDescriptionText.text = description;
+			if(selectedNotes.length > 1)
+			{
+				for (note in selectedNotes)
+				{
+					if(note == null || !note.isEvent) continue;
+
+					var event:EventMetaNote = cast (note, EventMetaNote);
+					event.events[event.events.length - 1][0] = eventName;
+					event.updateEventText();
+				}
+			}
+			else if(selectedNotes.length == 1 && selectedNotes[0].isEvent)
+			{
+				var event:EventMetaNote = cast (selectedNotes[0], EventMetaNote);
+				event.events[Std.int(FlxMath.bound(curEventSelected, 0, event.events.length - 1))][0] = eventName;
+				event.updateEventText();
+			}
+		});
+
+		function genericEventButton(func:EventMetaNote->Void)
+		{
+			if(selectedNotes.length == 1)
+			{
+				if(selectedNotes[0].isEvent)
+				{
+					var event:EventMetaNote = cast (selectedNotes[0], EventMetaNote);
+					func(event);
+					updateSelectedEventText();
+				}
+				else showOutput('Note selected must be an Event!', true);
+			}
+			else showOutput('You must select a single event to press this button.', true);
+		}
+
+		var objX2 = 140;
+		var removeButton:PsychUIButton = new PsychUIButton(objX2, objY, '-', function()
+		{
+			genericEventButton(function(event:EventMetaNote)
+			{
+				if(event.events.length > 1)
+				{
+					var selectedEvent = event.events[curEventSelected];
+					if(selectedEvent != null)
+					{
+						event.events.remove(selectedEvent);
+						event.updateEventText();
+						curEventSelected--;
+					}
+					else showOutput('No event is selected when you deleted it?? Weird.', true);
+				}
+				else
+				{
+					selectedNotes.remove(event);
+					events.remove(event);
+					curRenderedNotes.remove(event, true);
+					addUndoAction(DELETE_NOTE, {events: [event]});
+				}
+			});
+		}, 20);
+		var addButton:PsychUIButton = new PsychUIButton(objX2 + 30, objY, '+', function()
+		{
+			genericEventButton(function(event:EventMetaNote)
+			{
+				event.events.push([eventsList[Std.int(Math.max(eventDropDown.selectedIndex, 0))][0], value1InputText.text, value2InputText.text, value3InputText.text, value4InputText.text]);
+				event.updateEventText();
+				curEventSelected++;
+			});
+		}, 20);
+		var leftButton:PsychUIButton = new PsychUIButton(objX2 + 80, objY, '<', function()
+		{
+			genericEventButton(function(event:EventMetaNote) curEventSelected = FlxMath.wrap(curEventSelected - 1, 0, event.events.length - 1));
+		}, 20);
+		var rightButton:PsychUIButton = new PsychUIButton(objX2 + 110, objY, '>', function()
+		{
+			genericEventButton(function(event:EventMetaNote) curEventSelected = FlxMath.wrap(curEventSelected + 1, 0, event.events.length - 1));
+		}, 20);
+		removeButton.normalStyle.bgColor = FlxColor.RED;
+		removeButton.normalStyle.textColor = FlxColor.WHITE;
+		addButton.normalStyle.bgColor = FlxColor.GREEN;
+		addButton.normalStyle.textColor = FlxColor.WHITE;
+
+		selectedEventText = new FlxText(150, objY + 30, 150, '');
+		selectedEventText.visible = false;
+
+		function changeEventsValue(str:String, n:Int)
+		{
+			if(selectedNotes.length > 1)
+			{
+				for (note in selectedNotes)
+				{
+					if(note == null || !note.isEvent) continue;
+
+					var event:EventMetaNote = cast (note, EventMetaNote);
+					event.events[event.events.length - 1][n] = str;
+					event.updateEventText();
+				}
+			}
+			else if(selectedNotes.length == 1 && selectedNotes[0].isEvent)
+			{
+				var event:EventMetaNote = cast (selectedNotes[0], EventMetaNote);
+				event.events[Std.int(FlxMath.bound(curEventSelected, 0, event.events.length - 1))][n] = str;
+				event.updateEventText();
+			}
+		}
+
+		objY += 70;
+		value1InputText = new PsychUIInputText(objX, objY, 120, '', 8);
+		value1InputText.onChange = function(old:String, cur:String) changeEventsValue(cur, 1);
+		value2InputText = new PsychUIInputText(objX + 150, objY, 120, '', 8);
+		value2InputText.onChange = function(old:String, cur:String) changeEventsValue(cur, 2);
+
+		objY += 40;
+		value3InputText = new PsychUIInputText(objX, objY, 120, '', 8);
+		value3InputText.onChange = function(old:String, cur:String) changeEventsValue(cur, 3);
+		value4InputText = new PsychUIInputText(objX + 150, objY, 120, '', 8);
+		value4InputText.onChange = function(old:String, cur:String) changeEventsValue(cur, 4);
+
+		objY += 40;
+		eventDescriptionText = new FlxText(objX, objY, 280, defaultEvents[0][1]);
+
+		tab_group.add(new FlxText(eventDropDown.x, eventDropDown.y - 15, 80, Language.get('charting_event_drop')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(value1InputText.x, value1InputText.y - 15, 80, 'Value 1:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(value2InputText.x, value2InputText.y - 15, 80, 'Value 2:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(value3InputText.x, value3InputText.y - 15, 80, 'Value 3:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(value4InputText.x, value4InputText.y - 15, 80, 'Value 4:').setFormat(Paths.font(Language.get('uitab_font'))));
+
+		tab_group.add(removeButton);
+		tab_group.add(addButton);
+		tab_group.add(leftButton);
+		tab_group.add(rightButton);
+		tab_group.add(selectedEventText);
+
+		tab_group.add(value1InputText);
+		tab_group.add(value2InputText);
+		tab_group.add(value3InputText);
+		tab_group.add(value4InputText);
+		tab_group.add(eventDescriptionText);
+		
+		tab_group.add(eventDropDown); //lowest priority to display properly
+	}
+
+	var susLengthLastVal:Float = 0; //used for multiple notes selected
+	var susLengthStepper:PsychUINumericStepper;
+	var strumTimeStepper:PsychUINumericStepper;
+	var noteTypeDropDown:PsychUIDropDownMenu;
+	var noteTypes:Array<String>;
+	function addNoteTab()
+	{
+		var tab_group = mainBox.getTab(Language.get('charting_notes_text')).menu;
+		var objX = 10;
+		var objY = 25;
+
+		susLengthStepper = new PsychUINumericStepper(objX, objY, Conductor.stepCrochet / 2, 0, 0, Conductor.stepCrochet * 128, 1, 80);
+		susLengthStepper.onValueChange = function()
+		{
+			var halfStep:Float = (Conductor.stepCrochet / 2);
+			trace(halfStep, susLengthStepper.value);
+			var val:Float = Math.round(susLengthStepper.value / halfStep) * halfStep;
+			susLengthStepper.value = val;
+			if(susLengthLastVal != susLengthStepper.value)
+			{
+				if(selectedNotes.length > 1)
+				{
+					for (note in selectedNotes)
+					{
+						if(note == null && !note.isEvent) continue;
+						note.setSustainLength(note.sustainLength + (susLengthStepper.value - susLengthLastVal), Conductor.stepCrochet, curZoom);
+					}
+				}
+				else if(selectedNotes.length == 1) selectedNotes[0].setSustainLength(susLengthStepper.value, Conductor.stepCrochet, curZoom);
+				susLengthLastVal = susLengthStepper.value;
+			}
+		};
+
+		objY += 40;
+		strumTimeStepper = new PsychUINumericStepper(objX, objY, Conductor.stepCrochet, 0, -5000, Math.POSITIVE_INFINITY, 3, 120);
+		strumTimeStepper.onValueChange = function()
+		{
+			if(selectedNotes.length < 1) return;
+
+			var firstTime:Float = selectedNotes[0].strumTime;
+			for (note in selectedNotes)
+			{
+				if(note == null) continue;
+
+				note.setStrumTime(Math.max(-5000, strumTimeStepper.value + (note.strumTime - firstTime)));
+				positionNoteYOnTime(note, curSec);
+
+				if(note.isEvent)
+				{
+					cast (note, EventMetaNote).updateEventText();
+				}
+			}
+			softReloadNotes();
+		};
+		
+		objY += 40;
+		noteTypeDropDown = new PsychUIDropDownMenu(objX, objY, [], function(id:Int, changeToType:String)
+		{
+			var newSelected:Array<MetaNote> = [];
+			var typeSelected:String = noteTypes[id].trim();
+			for (note in selectedNotes)
+			{
+				if(note == null || note.isEvent) continue;
+
+				if(typeSelected != null && typeSelected.length > 0)
+					note.songData[3] = typeSelected;
+				else
+					note.songData.remove(note.songData[3]);
+
+				var id:Int = notes.indexOf(note);
+				if(id > -1)
+				{
+					notes[id] = createNote(note.songData, curSec);
+					actionReplaceNotes(note, notes[id]);
+					newSelected.push(notes[id]);
+					note.destroy();
+				}
+			}
+			selectedNotes = newSelected;
+			softReloadNotes();
+		}, 150);
+		
+		tab_group.add(new FlxText(susLengthStepper.x, susLengthStepper.y - 15, 80, Language.get('charting_sustainlength_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(strumTimeStepper.x, strumTimeStepper.y - 15, 100, Language.get('charting_notetime_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(noteTypeDropDown.x, noteTypeDropDown.y - 15, 80, Language.get('charting_notetype_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(susLengthStepper);
+		tab_group.add(strumTimeStepper);
+		tab_group.add(noteTypeDropDown);
+	}
+
+	var mustHitCheckBox:PsychUICheckBox;
+	var gfSectionCheckBox:PsychUICheckBox;
+	var altAnimSectionCheckBox:PsychUICheckBox;
+
+	var changeBpmCheckBox:PsychUICheckBox;
+	var changeBpmStepper:PsychUINumericStepper;
+	var beatsPerSecStepper:PsychUINumericStepper;
+
+	function addSectionTab()
+	{
+		var affectNotes:PsychUICheckBox = null;
+		var affectEvents:PsychUICheckBox = null;
+		var copyLastSecStepper:PsychUINumericStepper = null;
+		var tab_group = mainBox.getTab(Language.get('charting_section_text')).menu;
+		var objX = 10;
+		var objY = 10;
+		function copyNotesOnSection(?secOff:Int = 0, ?showMessage:Bool = true) //Used on "Copy Section" and "Copy Last Section" buttons
+		{
+			var curSectionTime:Null<Float> = cachedSectionTimes[curSec - secOff];
+			if(curSectionTime == null)
+			{
+				//showOutput('ERROR: Unknown section??', true);
+				return;
+			}
+
+			var nextSectionTime:Null<Float> = cachedSectionTimes[curSec - secOff + 1];
+			if(nextSectionTime == null) Math.POSITIVE_INFINITY;
+
+			var notesCopyNum:Int = 0;
+			if(affectNotes.checked)
+			{
+				copiedNotes = [];
+				for (note in notes)
+				{
+					if(note.strumTime >= curSectionTime && note.strumTime < nextSectionTime)
+					{
+						var dataCopy:Array<Dynamic> = makeNoteDataCopy(note.songData, false);
+						dataCopy[0] = note.strumTime - curSectionTime;
+						copiedNotes.push(dataCopy);
+						notesCopyNum++;
+					}
+				}
+			}
+
+			var eventsCopyNum:Int = 0;
+			if(affectEvents.checked)
+			{
+				copiedEvents = [];
+				for (event in events)
+				{
+					if(event.strumTime >= curSectionTime && event.strumTime < nextSectionTime)
+					{
+						var dataCopy:Array<Dynamic> = makeNoteDataCopy(event.songData, true);
+						dataCopy[0] = event.strumTime - curSectionTime;
+						copiedEvents.push(dataCopy);
+						eventsCopyNum++;
+					}
+				}
+			}
+
+			if(showMessage)
+			{
+				if(notesCopyNum == 0 && eventsCopyNum == 0)
+				{
+					showOutput('Nothing to copy!', true);
+					return;
+				}
+
+				var str:String = '';
+				if(notesCopyNum > 0) str += 'Notes Copied: $notesCopyNum';
+				if(eventsCopyNum > 0)
+				{
+					if(str.length > 0) str += '\n';
+					str += 'Events Copied: $eventsCopyNum';
+				}
+	
+				if(str.length > 0) showOutput(str);
+			}
+		}
+
+		mustHitCheckBox = new PsychUICheckBox(objX, objY, Language.get('charting_musthitsec_text'), 70, function()
+		{
+			var sec = getCurChartSection();
+			if(sec != null) sec.mustHitSection = mustHitCheckBox.checked;
+			updateHeads(true);
+		});
+		gfSectionCheckBox = new PsychUICheckBox(objX + 100, objY, Language.get('charting_gfsec_text'), 70, function()
+		{
+			var sec = getCurChartSection();
+			if(sec != null) sec.gfSection = gfSectionCheckBox.checked;
+			updateHeads(true);
+		});
+		altAnimSectionCheckBox = new PsychUICheckBox(objX + 200, objY, Language.get('charting_altanim_text'), 70, function()
+		{
+			var sec = getCurChartSection();
+			if(sec != null) sec.altAnim = altAnimSectionCheckBox.checked;
+		});
+
+		objY += 40;
+		changeBpmCheckBox = new PsychUICheckBox(objX, objY, Language.get('charting_changebpm_text'), 80, function()
+		{
+			var sec = getCurChartSection();
+			if(sec != null)
+			{
+				var oldTimes:Array<Float> = cachedSectionTimes.copy();
+				sec.changeBPM = changeBpmCheckBox.checked;
+				if(!Reflect.hasField(sec, 'bpm')) sec.bpm = changeBpmStepper.value;
+				adaptNotesToNewTimes(oldTimes);
+			}
+		});
+
+		objY += 25;
+		changeBpmStepper = new PsychUINumericStepper(objX, objY, 1, 0, 1, 10000, 3);
+		changeBpmStepper.onValueChange = function()
+		{
+			var sec = getCurChartSection();
+			if(sec != null)
+			{
+				var oldTimes:Array<Float> = cachedSectionTimes.copy();
+				sec.bpm = changeBpmStepper.value;
+				sec.changeBPM = true;
+				changeBpmCheckBox.checked = true;
+				adaptNotesToNewTimes(oldTimes);
+			}
+		};
+
+		beatsPerSecStepper = new PsychUINumericStepper(objX + 150, objY, 1, 4, 1, 16, 2);
+		beatsPerSecStepper.onValueChange = function()
+		{
+			beatsPerSecStepper.value = Math.round(beatsPerSecStepper.value * 4) / 4;
+			var sec = getCurChartSection();
+			if(sec != null)
+			{
+				var oldTimes:Array<Float> = cachedSectionTimes.copy();
+				sec.sectionBeats = beatsPerSecStepper.value;
+				adaptNotesToNewTimes(oldTimes);
+			}
+		};
+
+		objY += 40;
+		var copyButton:PsychUIButton = new PsychUIButton(objX, objY, Language.get('charting_copysec_button'), copyNotesOnSection.bind());
+		var pasteButton:PsychUIButton = new PsychUIButton(objX + 100, objY, Language.get('charting_pastesec_button'), function()
+		{
+			pasteCopiedNotesToSection(affectNotes.checked, affectEvents.checked);
+		});
+		var clearButton:PsychUIButton = new PsychUIButton(objX + 200, objY, Language.get('charting_clearsec_button'), function()
+		{
+			for (note in curRenderedNotes)
+			{
+				if(note == null) continue;
+
+				if(!note.isEvent && affectNotes.checked)
+					notes.remove(note);
+				if(note.isEvent && affectEvents.checked)
+					events.remove(cast (note, EventMetaNote));
+
+				selectedNotes.remove(note);
+			}
+			softReloadNotes(true);
+		});
+		clearButton.normalStyle.bgColor = FlxColor.RED;
+		clearButton.normalStyle.textColor = FlxColor.WHITE;
+
+		objY += 25;
+		affectNotes = new PsychUICheckBox(objX, objY, Language.get('charting_notes_text'), 60);
+		affectNotes.checked = true;
+		affectEvents = new PsychUICheckBox(objX + 100, objY, Language.get('charting_events_text'), 60);
+
+		objY += 32;
+		var copyLastSecButton:PsychUIButton = new PsychUIButton(objX, objY, Language.get('charting_copylastsec_button'), function()
+		{
+			var lastCopiedNotes = copiedNotes;
+			var lastCopiedEvents = copiedEvents;
+			copyNotesOnSection(Std.int(copyLastSecStepper.value), false);
+			pasteCopiedNotesToSection(affectNotes.checked, affectEvents.checked);
+			copiedNotes = lastCopiedNotes;
+			copiedEvents = lastCopiedEvents;
+		});
+		copyLastSecButton.resize(80, 26);
+		copyLastSecStepper = new PsychUINumericStepper(objX + 110, objY + 2, 1, 1, -999, 999, 0);
+		
+		objY += 40;
+		var swapSectionButton:PsychUIButton = new PsychUIButton(objX, objY, Language.get('charting_swapsec_button'), function()
+		{
+			var maxData:Int = GRID_COLUMNS_PER_PLAYER * GRID_PLAYERS;
+			for (note in curRenderedNotes)
+			{
+				if(note != null && !note.isEvent)
+				{
+					var data:Int = note.songData[1] + GRID_COLUMNS_PER_PLAYER;
+					if(data >= maxData) data -= maxData;
+					note.changeNoteData(data);
+					positionNoteXByData(note);
+				}
+			}
+			softReloadNotes(true);
+		});
+		var duetSectionButton:PsychUIButton = new PsychUIButton(objX + 100, objY, Language.get('charting_duetsec_button'), function()
+		{
+			var side:Int = -1;
+			for (note in curRenderedNotes.members)
+			{
+				if(note == null || note.isEvent) continue;
+
+				//First figure out if there are notes on more than one player's sides to cancel operation early
+				if(side > -1)
+				{
+					if(Math.floor(note.songData[1] / GRID_COLUMNS_PER_PLAYER) != side)
+					{
+						showOutput('You cannot press this button with notes on more than one side.');
+						return;
+					}
+				}
+				else side = Math.floor(note.songData[1] / GRID_COLUMNS_PER_PLAYER);
+			}
+
+			var pushedNotes:Array<MetaNote> = [];
+			for (note in curRenderedNotes.members)
+			{
+				if(note == null || note.isEvent) continue;
+
+				for (i in 0...GRID_PLAYERS)
+				{
+					if(i == side) continue;
+
+					var songDataCopy:Array<Dynamic> = note.songData.copy();
+					songDataCopy[1] = note.noteData + i * GRID_COLUMNS_PER_PLAYER;
+					var newNote = createNote(songDataCopy);
+					notes.push(newNote);
+					pushedNotes.push(newNote);
+				}
+			}
+			notes.sort(PlayState.sortByTime);
+			softReloadNotes(true);
+			
+			addUndoAction(ADD_NOTE, {notes: pushedNotes});
+		});
+		var mirrorNotesButton:PsychUIButton = new PsychUIButton(objX + 200, objY, Language.get('charting_mirrornote_button'), function()
+		{
+			var maxData:Int = GRID_COLUMNS_PER_PLAYER * GRID_PLAYERS;
+			for (note in curRenderedNotes)
+			{
+				if(note == null || note.isEvent) continue;
+
+				var data:Int = Std.int(note.songData[1]);
+				note.changeNoteData((Math.floor(data / GRID_COLUMNS_PER_PLAYER) * GRID_COLUMNS_PER_PLAYER) + GRID_COLUMNS_PER_PLAYER - note.noteData - 1);
+				positionNoteXByData(note);
+			}
+			softReloadNotes(true);
+		});
+
+		tab_group.add(mustHitCheckBox);
+		tab_group.add(gfSectionCheckBox);
+		tab_group.add(altAnimSectionCheckBox);
+
+		tab_group.add(new FlxText(beatsPerSecStepper.x, beatsPerSecStepper.y - 15, 100, Language.get('charting_beatspersec_text')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(changeBpmCheckBox);
+		tab_group.add(changeBpmStepper);
+		tab_group.add(beatsPerSecStepper);
+		
+		tab_group.add(copyButton);
+		tab_group.add(pasteButton);
+		tab_group.add(clearButton);
+		tab_group.add(affectNotes);
+		tab_group.add(affectEvents);
+
+		tab_group.add(copyLastSecButton);
+		tab_group.add(copyLastSecStepper);
+
+		tab_group.add(swapSectionButton);
+		tab_group.add(duetSectionButton);
+		tab_group.add(mirrorNotesButton);
+	}
+
+	function reloadNotesDropdowns()
+	{
+		// Event drop down
+		if(eventDropDown != null)
+		{
+			eventsList = [];
+			var eventFiles:Array<String> = loadFileList('custom_events/', ['.txt']);
+			for (file in eventFiles)
+			{
+				var desc:String = Paths.getTextFromFile('custom_events/$file.txt');
+				eventsList.push([file, desc]);
+			}
+
+			for (id => event in defaultEvents)
+				if(!eventsList.contains(event))
+					eventsList.insert(id, event);
+			
+			var displayEventsList:Array<String> = [];
+			for (id => data in eventsList)
+			{
+				if(id > 0)
+					displayEventsList[id] = '$id. ${data[0]}';
+				else
+					displayEventsList.push('');
+			}
+
+			var lastSelected:String = eventDropDown.selectedLabel;
+			eventDropDown.list = displayEventsList;
+			eventDropDown.selectedLabel = lastSelected;
+		}
+
+		// Note type drop down
+		if(noteTypeDropDown != null)
+		{
+			var exts:Array<String> = ['.txt'];
+			#if LUA_ALLOWED exts.push('.lua'); #end
+			#if HSCRIPT_ALLOWED exts.push('.hx'); #end
+			noteTypes = loadFileList('custom_notetypes/', exts);
+			for (id => noteType in Note.defaultNoteTypes)
+				if(!noteTypes.contains(noteType))
+					noteTypes.insert(id, noteType);
+
+			if(Song.chartPath != null && Song.chartPath.length > 0)
+			{
+				var parentFolder:String = Song.chartPath.replace('\\', '/');
+				parentFolder = parentFolder.substr(0, Song.chartPath.lastIndexOf('/')+1);
+				var notetypeFile:Array<String> = CoolUtil.coolTextFile(parentFolder + 'notetypes.txt');
+				if(notetypeFile.length > 0)
+				{
+					for (ntTyp in notetypeFile)
+					{
+						var name:String = ntTyp.trim();
+						if(!noteTypes.contains(name))
+							noteTypes.push(name);
+					}
+				}
+			}
+			
+			var displayNoteTypes:Array<String> = noteTypes.copy();
+			for (id => key in displayNoteTypes)
+			{
+				if(id == 0) continue;
+				displayNoteTypes[id] = '$id. $key';
+			}
+			
+			var lastSelected:String = noteTypeDropDown.selectedLabel;
+			noteTypeDropDown.list = displayNoteTypes;
+			noteTypeDropDown.selectedLabel = lastSelected;
+		}
+	}
+
+	function pasteCopiedNotesToSection(?canCopyNotes:Bool = true, ?canCopyEvents:Bool = true, ?showMessage:Bool = true) //Used on "Paste Section" and "Copy Last Section" buttons
+	{
+		var curSectionTime:Null<Float> = cachedSectionTimes[curSec];
+		if(curSectionTime == null)
+		{
+			showOutput('ERROR: Unknown section??', true);
+			return [];
+		}
+
+		var pushedNotes:Array<MetaNote> = [];
+		var nts:Array<MetaNote> = [];
+		var evs:Array<EventMetaNote> = [];
+		if(canCopyNotes && copiedNotes.length > 0)
+		{
+			for (note in copiedNotes)
+			{
+				if(note == null) continue;
+				var dataCopy:Array<Dynamic> = makeNoteDataCopy(note, false);
+				dataCopy[0] += curSectionTime;
+
+				var createdNote = createNote(dataCopy, curSec);
+				notes.push(createdNote);
+				pushedNotes.push(createdNote);
+				nts.push(createdNote);
+			}
+			notes.sort(PlayState.sortByTime);
+		}
+
+		if(canCopyEvents && copiedEvents.length > 0)
+		{
+			for (event in copiedEvents)
+			{
+				if(event == null) continue;
+				var dataCopy:Array<Dynamic> = makeNoteDataCopy(event, true);
+				dataCopy[0] += curSectionTime;
+
+				var createdEvent = createEvent(dataCopy);
+				events.push(createdEvent);
+				pushedNotes.push(createdEvent);
+				evs.push(createdEvent);
+			}
+			events.sort(PlayState.sortByTime);
+		}
+		loadSection();
+		
+		if(showMessage)
+		{
+			if(nts.length == 0 && evs.length == 0)
+			{
+				showOutput('Nothing to paste!', true);
+				return [];
+			}
+
+			var str:String = '';
+			if(nts.length > 0) str += 'Notes Added: ${nts.length}';
+			if(evs.length > 0)
+			{
+				if(str.length > 0) str += '\n';
+				str += 'Events Added: ${evs.length}';
+			}
+
+			if(str.length > 0) showOutput(str);
+		}
+		addUndoAction(ADD_NOTE, {notes: nts, events: evs});
+		return pushedNotes;
+	}
+
+	var songNameInputText:PsychUIInputText;
+	var allowVocalsCheckBox:PsychUICheckBox;
+
+	var bpmStepper:PsychUINumericStepper;
+	var scrollSpeedStepper:PsychUINumericStepper;
+	var audioOffsetStepper:PsychUINumericStepper;
+ 	var specialInstInputText:PsychUIInputText;
+	var specialVocalInputText:PsychUIInputText;
+
+	var stageDropDown:PsychUIDropDownMenu;
+	var playerDropDown:PsychUIDropDownMenu;
+	var opponentDropDown:PsychUIDropDownMenu;
+	var girlfriendDropDown:PsychUIDropDownMenu;
+	
+	function addSongTab()
+	{
+		var tab_group = mainBox.getTab(Language.get('charting_song_text')).menu;
+		var objX = 10;
+		var objY = 25;
+
+		songNameInputText = new PsychUIInputText(objX, objY, 100, 'None', 8);
+		songNameInputText.onChange = function(old:String, cur:String) PlayState.SONG.song = cur;
+
+		allowVocalsCheckBox = new PsychUICheckBox(objX, objY + 20, Language.get('charting_allvoc_text'), 80, function()
+		{
+			PlayState.SONG.needsVoices = allowVocalsCheckBox.checked;
+			loadMusic();
+		});
+		var reloadAudioButton:PsychUIButton = new PsychUIButton(objX + 120, objY, Language.get('charting_reaudio_button'), function() loadMusic(true), 80);
+
+		#if (mac || mobile)
+		var reloadJsonButton:PsychUIButton = new PsychUIButton(objX + 205, objY, Language.get('charting_rejsonm_button'), function()
+		{
+			var cur = Paths.formatToSongPath(songNameInputText.text);
+			var curdiff = Highscore.formatSong(cur, PlayState.storyDifficulty);
+			var diff = false;
+			var loadedChart:SwagSong = try {
+				diff = true;
+				Song.getChart(curdiff, cur);
+			} catch (e) {
+				diff = false;
+				Song.getChart(cur, cur);
+			}
+			if(loadedChart == null || !Reflect.hasField(loadedChart, 'song')) //Check if chart is ACTUALLY a chart and valid
+			{
+				showOutput('Error: File loaded is not a Psych Engine/FNF 0.2.x.x chart.', true);
+				return;
+			}
+
+			var func:Void->Void = function()
+			{
+				loadChart(loadedChart);
+				Song.chartPath = diff ? curdiff : cur;
+				reloadNotesDropdowns();
+				prepareReload();
+				showOutput('Opened chart "${diff ? curdiff : cur}" successfully!');
+			}
+					
+			if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_unsaved'), func));
+			else func();
+		}, 80);
+		#end
+
+		objY += 65;
+		//(x:Float = 0, y:Float = 0, step:Float = 1, defValue:Float = 0, min:Float = -999, max:Float = 999, decimals:Int = 0, ?wid:Int = 60, ?isPercent:Bool = false)
+		bpmStepper = new PsychUINumericStepper(objX, objY, 1, 1, 1, 10000, 3);
+		bpmStepper.onValueChange = function()
+		{
+			var oldTimes:Array<Float> = cachedSectionTimes.copy();
+			PlayState.SONG.bpm = bpmStepper.value;
+			adaptNotesToNewTimes(oldTimes);
+		};
+
+		scrollSpeedStepper = new PsychUINumericStepper(objX + 90, objY, 0.1, 1, 0.1, 10000, 2);
+		scrollSpeedStepper.onValueChange = function() PlayState.SONG.speed = scrollSpeedStepper.value;
+
+		audioOffsetStepper = new PsychUINumericStepper(objX + 180, objY, 1, 0, -500, 500, 0);
+		audioOffsetStepper.onValueChange = function()
+		{
+			PlayState.SONG.offset = audioOffsetStepper.value;
+			Conductor.offset = audioOffsetStepper.value;
+			updateWaveform();
+		};
+
+		specialInstInputText = new PsychUIInputText(objX + 200, objY + 80, 100, '', 8);
+		specialInstInputText.onChange = function(old:String, cur:String)
+		{
+			PlayState.SONG.specialInst = specialInstInputText.text;
+			//updateWaveform();
+		};
+
+		specialVocalInputText = new PsychUIInputText(objX + 200, objY + 140, 100, '', 8);
+		specialVocalInputText.onChange = function(old:String, cur:String)
+		{
+			PlayState.SONG.specialVocal = specialVocalInputText.text;
+			//updateWaveform();
+		};
+
+		tab_group.add(new FlxText(songNameInputText.x, songNameInputText.y - 15, 80, Language.get('charting_songname')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(songNameInputText);
+		tab_group.add(allowVocalsCheckBox);
+		tab_group.add(reloadAudioButton);
+		tab_group.add(specialInstInputText);
+		tab_group.add(specialVocalInputText);
+	#if (mac || mobile)
+		tab_group.add(reloadJsonButton);
+	#end
+
+	// Show Characters checkbox
+	showCharactersCheckBox = new PsychUICheckBox(objX + 200, specialVocalInputText.y + 40, 'Show Characters', 100);
+	showCharactersCheckBox.checked = chartEditorSave.data.showCharacters;
+	showCharactersCheckBox.onClick = function()
+	{
+		chartEditorSave.data.showCharacters = showCharactersCheckBox.checked;
+		chartEditorSave.flush();
+
+		if(!charactersLoaded)
+		{
+			initCharacters();
+		}
+		else
+		{
+			if(dad != null) dad.visible = showCharactersCheckBox.checked;
+			if(boyfriend != null) boyfriend.visible = showCharactersCheckBox.checked;
+		}
+	};
+	tab_group.add(showCharactersCheckBox);
+
+	// Find characters
+	var characters:Array<String> = [];
+	//
+		
+		objY += 40;
+		playerDropDown = new PsychUIDropDownMenu(objX, objY, [''], function(id:Int, character:String)
+		{
+			PlayState.SONG.player1 = character;
+			updateJsonData();
+			updateHeads(true);
+			loadMusic();
+			updateCharacters();
+			trace('selected $character');
+		});
+		stageDropDown = new PsychUIDropDownMenu(objX + 140, objY, [''], function(id:Int, stage:String)
+		{
+			PlayState.SONG.stage = stage;
+			StageData.loadDirectory(PlayState.SONG);
+			trace('selected $stage');
+		});
+		
+		opponentDropDown = new PsychUIDropDownMenu(objX, objY + 40, [''], function(id:Int, character:String)
+		{
+			PlayState.SONG.player2 = character;
+			updateJsonData();
+			updateHeads(true);
+			loadMusic();
+			updateCharacters();
+			trace('selected $character');
+		});
+		
+		girlfriendDropDown = new PsychUIDropDownMenu(objX, objY + 80, [''], function(id:Int, character:String)
+		{
+			PlayState.SONG.gfVersion = character;
+			trace('selected $character');
+		});
+		
+		tab_group.add(new FlxText(bpmStepper.x, bpmStepper.y - 15, 50, 'BPM:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(scrollSpeedStepper.x, scrollSpeedStepper.y - 15, 80, Language.get('charting_scrollspeed')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(audioOffsetStepper.x, audioOffsetStepper.y - 15, 100, Language.get('charting_audiooffset')).setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(bpmStepper);
+		tab_group.add(scrollSpeedStepper);
+		tab_group.add(audioOffsetStepper);
+
+		//dropdowns
+		tab_group.add(new FlxText(stageDropDown.x, stageDropDown.y - 15, 80, 'Stage:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(playerDropDown.x, playerDropDown.y - 15, 80, 'Player:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(opponentDropDown.x, opponentDropDown.y - 15, 80, 'Opponent:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(girlfriendDropDown.x, girlfriendDropDown.y - 15, 80, 'Girlfriend:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(specialInstInputText.x, specialInstInputText.y - 15, 200, 'Special Inst:').setFormat(Paths.font(Language.get('uitab_font'))));
+		tab_group.add(new FlxText(specialVocalInputText.x, specialVocalInputText.y - 15, 200, 'Special Vocal:').setFormat(Paths.font(Language.get('uitab_font'))));
+
+		tab_group.add(stageDropDown);
+		tab_group.add(girlfriendDropDown);
+		tab_group.add(opponentDropDown);
+		tab_group.add(playerDropDown);
+	}
+
+	function addFileTab()
+	{
+		var tab = upperBox.getTab(Language.get("charting_file_text"));
+		var tab_group = tab.menu;
+		var btnX = tab.x - upperBox.x;
+		var btnY = 1;
+		var btnWid = Std.int(tab.width);
+
+		#if !mobile
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_new_tab1'), function()
+		{
+			var func:Void->Void = function()
+			{
+				openNewChart();
+				reloadNotesDropdowns();
+				prepareReload();
+			}
+
+			if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_startover'), func));
+			else func();
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_opchart_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			fileDialog.open(function()
+			{
+				try
+				{
+					var filePath:String = fileDialog.path.replace('\\', '/');
+					var loadedChart:SwagSong = Song.parseJSON(fileDialog.data, filePath.substr(filePath.lastIndexOf('/')));
+					if(loadedChart == null || !Reflect.hasField(loadedChart, 'song')) //Check if chart is ACTUALLY a chart and valid
+					{
+						showOutput('Error: File loaded is not a Psych Engine/FNF 0.2.x.x chart.', true);
+						return;
+					}
+
+					var func:Void->Void = function()
+					{
+						loadChart(loadedChart);
+						Song.chartPath = fileDialog.path;
+						reloadNotesDropdowns();
+						prepareReload();
+						showOutput('Opened chart "${Song.chartPath}" successfully!');
+					}
+					
+					if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_unsaved'), func));
+					else func();
+				}
+				catch(e:Exception)
+				{
+					showOutput('Error: ${e.message}', true);
+					trace(e.stack);
+				}
+			});
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY += 20;
+		#end
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_opautosave_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			if(!FileSystem.exists('backups/'))
+			{
+				showOutput('The "backups" folder does not exist.', true);
+				return;
+			}
+			
+			var fileList:Array<String> = Paths.readDirectory('backups/').filter((file:String) -> file.endsWith('.$BACKUP_EXT'));
+			if(fileList.length < 1)
+			{
+				showOutput('No autosave files found.', true);
+				return;
+			}
+
+			fileList.sort((a:String, b:String) -> (a.toUpperCase() < b.toUpperCase()) ? 1 : -1); //Sort alphabetically descending
+			var maxItems:Int = Std.int(Math.min(5, fileList.length));
+			var radioGrp:PsychUIRadioGroup = new PsychUIRadioGroup(0, 0, fileList, 25, maxItems, false, 240);
+			radioGrp.checked = 0;
+
+			var hei:Float = radioGrp.height + 160;
+			openSubState(new BasePrompt(420, hei, 'Choose an Autosave',
+				function(state:BasePrompt) {
+					upperBox.isMinimized = true;
+					upperBox.bg.visible = false;
+
+					var btn:PsychUIButton = new PsychUIButton(state.bg.x + state.bg.width - 40, state.bg.y, 'X', state.close, 40);
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					radioGrp.screenCenter(X);
+					radioGrp.y = state.bg.y + 80;
+					radioGrp.cameras = state.cameras;
+					state.add(radioGrp);
+
+					var btn:PsychUIButton = new PsychUIButton(0, radioGrp.y + radioGrp.height + 20, 'Load', function()
+					{
+						var autosaveName:String = fileList[radioGrp.checked];
+						var path:String = 'backups/$autosaveName';
+						state.close();
+
+						if(FileSystem.exists(path))
+						{
+							try
+							{
+								var loadedChart:SwagSong = Song.parseJSON(File.getContent(path), autosaveName, null);
+								if(loadedChart == null || !Reflect.hasField(loadedChart, '__original_path'))
+								{
+									showOutput('Error: File loaded is not a valid Psych Engine autosave.', true);
+									return;
+	
+								}
+	
+								var originalPath:String = Reflect.field(loadedChart, '__original_path');
+								Reflect.deleteField(loadedChart, '__original_path');
+	
+								var func:Void->Void = function()
+								{
+									Song.chartPath = FileSystem.exists(originalPath) ? originalPath : null;
+									loadChart(loadedChart);
+									reloadNotesDropdowns();
+									prepareReload();
+	
+									showOutput('Opened autosave "$autosaveName" successfully!');
+								}
+								
+								if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_unsaved'), func));
+								else func();
+							}
+							catch(e:Exception)
+							{
+								showOutput('Error on loading autosave: ${e.message}', true);
+							}
+						}
+						else showOutput('Error! Autosave file selected could not be found, huh??', true);
+					});
+					btn.cameras = state.cameras;
+					btn.screenCenter(X);
+					state.add(btn);
+				}
+			));
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		#if !mobile
+		if(SHOW_EVENT_COLUMN)
+		{
+			btnY += 20;
+			var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_opevent_tab1'), function()
+			{
+				if(!fileDialog.completed) return;
+				upperBox.isMinimized = true;
+				upperBox.bg.visible = false;
+	
+				fileDialog.open(function()
+				{
+					try
+					{
+						var filePath:String = fileDialog.path.replace('\\', '/');
+						var eventsFile:SwagSong = Song.parseJSON(fileDialog.data, filePath.substr(filePath.lastIndexOf('/')));
+						if(eventsFile == null || Reflect.hasField(eventsFile, 'scrollSpeed') || eventsFile.events == null)
+						{
+							showOutput('Error: File loaded is not a Psych Engine chart/events file.', true);
+							return;
+						}
+	
+						var loadedEvents:Array<Dynamic> = eventsFile.events;
+						if(loadedEvents.length < 1)
+						{
+							showOutput('Events file loaded is empty.', true);
+							return;
+						}
+	
+						openSubState(new BasePrompt('Events Found! Choose an action.',
+							function(state:BasePrompt)
+							{
+								var btnY = 390;
+								var btn:PsychUIButton = new PsychUIButton(0, btnY, 'Replace All', function()
+								{
+									for (event in events)
+									{
+										if(event != null)
+										{
+											event.destroy();
+											selectedNotes.remove(event);
+										}
+									}
+									undoActions = [];
+									events = [];
+	
+									for (event in loadedEvents)
+										events.push(createEvent(event));
+	
+									softReloadNotes();
+									state.close();
+									showOutput('Events loaded successfully!');
+								});
+								btn.normalStyle.bgColor = FlxColor.RED;
+								btn.normalStyle.textColor = FlxColor.WHITE;
+								btn.screenCenter(X);
+								btn.x -= 125;
+								btn.cameras = state.cameras;
+								state.add(btn);
+								
+								var btn:PsychUIButton = new PsychUIButton(0, btnY, 'Add', function()
+								{
+									for (event in loadedEvents)
+										events.push(createEvent(event));
+	
+									softReloadNotes();
+									state.close();
+									showOutput('Events added successfully!');
+								});
+								btn.screenCenter(X);
+								btn.cameras = state.cameras;
+								state.add(btn);
+						
+								var btn:PsychUIButton = new PsychUIButton(0, btnY, 'Cancel', state.close);
+								btn.screenCenter(X);
+								btn.x += 125;
+								btn.cameras = state.cameras;
+								state.add(btn);
+							}
+						));
+					}
+					catch(e:Exception)
+					{
+						showOutput('Error: ${e.message}', true);
+						trace(e.stack);
+					}
+				});
+			}, btnWid);
+			btn.text.alignment = LEFT;
+			tab_group.add(btn);
+		}
+		#end
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_save1_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			saveChart();
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		#if !mobile
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_save2_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			saveChart(false);
+		},btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+		#end
+
+		if(SHOW_EVENT_COLUMN)
+		{
+			btnY += 20;
+			var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_save3_tab1'), function()
+			{
+				if(!fileDialog.completed) return;
+				upperBox.isMinimized = true;
+	
+				updateChartData();
+				#if mobile
+				StorageUtil.saveContent('events.json', PsychJsonPrinter.print({events: PlayState.SONG.events, format: 'mr_psych_v1'}, ['events']));
+				#else
+				fileDialog.save('events.json', PsychJsonPrinter.print({events: PlayState.SONG.events, format: 'mr_psych_v1'}, ['events']),
+					function() showOutput('Events saved successfully to: ${fileDialog.path}'), null,
+					function() showOutput('Error on saving events!', true));
+				#end
+			}, btnWid);
+			btn.text.alignment = LEFT;
+			tab_group.add(btn);
+		}
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_reloadchart_tab1'), function()
+		{
+			var func:Void->Void = function()
+			{
+				if(Song.chartPath == null)
+				{
+					showOutput('You must save/load a Chart first to Reload it!', true);
+					return;
+				}
+	
+				if(FileSystem.exists(Song.chartPath))
+				{
+					try
+					{
+						var reloadedChart:SwagSong = Song.parseJSON(File.getContent(Song.chartPath));
+						loadChart(reloadedChart);
+						reloadNotesDropdowns();
+						prepareReload();
+						showOutput('Chart reloaded successfully!');
+					}
+					catch(e:Exception)
+					{
+						showOutput('Error: ${e.message}', true);
+						trace(e.stack);
+					}
+				}
+				else showOutput('You must save/load a Chart first to Reload it!', true);
+			}
+
+			if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_unsaved'), func));
+			else func();
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+		#if !mobile
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_save4V_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			fileDialog.openDirectory('Save V-Slice Chart/Metadata JSONs', function()
+			{
+				try
+				{
+					var path:String = fileDialog.path.replace('\\', '/');
+
+					var chartName:String = Paths.formatToSongPath(PlayState.SONG.song) + '.json';
+					chartName = chartName.substring(chartName.lastIndexOf('/')+1, chartName.lastIndexOf('.'));
+
+					var chartFile:String = '$path/$chartName-chart.json';
+					var metadataFile:String = '$path/$chartName-metadata.json';
+
+					updateChartData();
+					var pack:VSlicePackage = VSlice.export(PlayState.SONG);
+
+					ClientPrefs.toggleVolumeKeys(false);
+					openSubState(new BasePrompt('Metadata',
+						function(state:BasePrompt)
+						{
+							var btnX = 640;
+							var btnY = 400;
+							var btn:PsychUIButton = new PsychUIButton(btnX, btnY, 'Save', function()
+							{
+								overwriteSavedSomething = false;
+								overwriteCheck(chartFile, '$chartName-chart.json', PsychJsonPrinter.print(pack.chart, ['events', 'notes', 'scrollSpeed']), function()
+								{
+									overwriteCheck(metadataFile, '$chartName-metadata.json', PsychJsonPrinter.print(pack.metadata, ['characters', 'difficulties', 'timeChanges']), function()
+									{
+										if(overwriteSavedSomething)
+											showOutput('Files saved successfully to: $path!');
+									});
+								});
+								state.close();
+							});
+							btn.normalStyle.bgColor = FlxColor.GREEN;
+							btn.normalStyle.textColor = FlxColor.WHITE;
+							btn.cameras = state.cameras;
+							state.add(btn);
+							
+							var btn:PsychUIButton = new PsychUIButton(btnX + 100, btnY, 'Cancel', state.close);
+							btn.cameras = state.cameras;
+							state.add(btn);
+							
+							var textX = FlxG.width/2 - 155;
+							var textY = 360;
+							var artistInput:PsychUIInputText = new PsychUIInputText(textX, textY, 120, pack.metadata.artist, 8);
+							artistInput.cameras = state.cameras;
+							artistInput.onChange = function(old:String, cur:String) pack.metadata.artist = cur;
+
+							var charterInput:PsychUIInputText = new PsychUIInputText(textX + 190, textY, 120, pack.metadata.charter, 8);
+							charterInput.cameras = state.cameras;
+							charterInput.onChange = function(old:String, cur:String) pack.metadata.charter = cur;
+							
+							var artistTxt:FlxText = new FlxText(artistInput.x, artistInput.y - 15, 100, 'Artist/Composer:');
+							artistTxt.cameras = state.cameras;
+							var charterTxt:FlxText = new FlxText(charterInput.x, charterInput.y - 15, 100, 'Charter:');
+							charterTxt.cameras = state.cameras;
+							state.add(artistTxt);
+							state.add(charterTxt);
+							state.add(artistInput);
+							state.add(charterInput);
+						}
+					));
+
+					//trace(pack.chart);
+					//trace(pack.metadata);
+					//trace(chartName, chartFile, metadataFile);
+				}
+				catch(e:Exception)
+				{
+					showOutput('Error: ${e.message}', true);
+					trace(e.stack);
+				}
+			});
+		},btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_saveP2V_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			fileDialog.open('song.json', 'Open a Psych Engine Chart JSON', function()
+			{
+				var filePath:String = fileDialog.path.replace('\\', '/');
+				var loadedChart:SwagSong = Song.parseJSON(fileDialog.data, filePath.substr(filePath.lastIndexOf('/')));
+				if(loadedChart == null || !Reflect.hasField(loadedChart, 'song')) //Check if chart is ACTUALLY a chart and valid
+				{
+					showOutput('Error: File loaded is not a Psych Engine 0.x.x/FNF 0.2.x.x chart.', true);
+					return;
+				}
+
+				var pack:VSlicePackage = VSlice.export(loadedChart);
+				if(pack.chart == null || pack.metadata == null)
+				{
+					showOutput('Error: Chart loaded is invalid.', true);
+					return;
+				}
+
+				ClientPrefs.toggleVolumeKeys(false);
+				openSubState(new BasePrompt('Metadata',
+					function(state:BasePrompt)
+					{
+						var songName:String = Paths.formatToSongPath(pack.metadata.songName);
+						var parentFolder:String = filePath.substring(0, filePath.lastIndexOf('/')+1);
+						var artistInput, charterInput, difficultiesInput:PsychUIInputText = null;
+
+						var btnX = 640;
+						var btnY = 400;
+						var btn:PsychUIButton = new PsychUIButton(btnX, btnY, 'Save', function()
+						{
+							try
+							{
+								var diffs:Array<String> = pack.metadata.playData.difficulties;
+								if(diffs != null && diffs.length > 0)
+								{
+									var diffsFound:Array<String> = [];
+									var defaultDiff:String = Paths.formatToSongPath(Difficulty.getDefault());
+									for (diff in diffs)
+									{
+										var diffPostfix:String = (diff != defaultDiff) ? '-$diff' : '';
+										var chartToFind:String = parentFolder + songName + diffPostfix + '.json';
+										if(FileSystem.exists(chartToFind))
+										{
+											var diffChart:SwagSong = Song.parseJSON(File.getContent(chartToFind), songName + diffPostfix);
+											if(diffChart != null)
+											{
+												var subpack:VSlicePackage = VSlice.export(diffChart);
+												var	diffSpeed:Null<Float> = subpack.chart.scrollSpeed.get(diff);
+												var diffNotes:Array<VSliceNote> = subpack.chart.notes.get(diff);
+												if(diffSpeed != null && diffNotes != null)
+												{
+													pack.chart.scrollSpeed.set(diff, diffSpeed);
+													pack.chart.notes.set(diff, diffNotes);
+												}
+												//trace(diff, diffSpeed, diffNotes.length);
+											}
+										}
+										else trace('File not found: $chartToFind');
+									}
+									
+									var chartToFind:String = parentFolder + 'events.json';
+									if(FileSystem.exists(chartToFind))
+									{
+										var eventsChart:SwagSong = Song.parseJSON(File.getContent(chartToFind), 'events');
+										if(eventsChart != null)
+										{
+											var subpack:VSlicePackage = VSlice.export(eventsChart);
+											if(subpack.chart.events != null && subpack.chart.events.length > 0)
+											{
+												for (event in subpack.chart.events)
+												{
+													if(event == null) continue;
+													pack.chart.events.push(event);
+												}
+											}
+										@:privateAccess pack.chart.events.sort(VSlice.sortByTime);
+										}
+									}
+
+									fileDialog.openDirectory('Save V-Slice Chart/Metadata JSONs', function()
+									{
+										overwriteSavedSomething = false;
+										var path:String = fileDialog.path.replace('\\', '/');
+										if(path.endsWith('/')) path = path.substr(0, path.length-1);
+										overwriteCheck('$path/$songName-chart.json', '$songName-chart.json', PsychJsonPrinter.print(pack.chart, ['events', 'notes', 'scrollSpeed']), function()
+										{
+											overwriteCheck('$path/$songName-metadata.json', '$songName-metadata.json', PsychJsonPrinter.print(pack.metadata, ['characters', 'difficulties', 'timeChanges']), function()
+											{
+												if(overwriteSavedSomething)
+													showOutput('Files saved successfully to: $path!');
+											});
+										});
+									});
+								}
+								else showOutput('Error: You need atleast one difficulty to export.', true);
+							}
+							catch(e:Exception)
+							{
+								showOutput('Error: ${e.message}', true);
+								trace(e.stack);
+							}
+							state.close();
+						});
+						btn.normalStyle.bgColor = FlxColor.GREEN;
+						btn.normalStyle.textColor = FlxColor.WHITE;
+						btn.cameras = state.cameras;
+						state.add(btn);
+						
+						var btn:PsychUIButton = new PsychUIButton(btnX + 100, btnY, 'Cancel', state.close);
+						btn.cameras = state.cameras;
+						state.add(btn);
+						
+						var textX = FlxG.width/2 - 180;
+						var textY = 360;
+						artistInput = new PsychUIInputText(textX, textY, 120, pack.metadata.artist, 8);
+						artistInput.cameras = state.cameras;
+						artistInput.onChange = function(old:String, cur:String) pack.metadata.artist = cur;
+	
+						charterInput = new PsychUIInputText(textX + 150, textY, 120, pack.metadata.charter, 8);
+						charterInput.cameras = state.cameras;
+						charterInput.onChange = function(old:String, cur:String) pack.metadata.charter = cur;
+
+						var diffs:Array<String> = pack.metadata.playData.difficulties;
+						if(diffs == null || diffs.length < 0) pack.metadata.playData.difficulties = diffs = ['easy', 'normal', 'hard'];
+						difficultiesInput = new PsychUIInputText(textX, textY + 42, 160, diffs.join(', '), 8);
+						difficultiesInput.cameras = state.cameras;
+						difficultiesInput.forceCase = LOWER_CASE;
+						difficultiesInput.onChange = function(old:String, cur:String)
+						{
+							pack.metadata.playData.difficulties = cur.split(',');
+
+							var diffs:Array<String> = pack.metadata.playData.difficulties;
+							for (num => diff in diffs)
+								diffs[num] = Paths.formatToSongPath(diff);
+
+							while(diffs.contains('')) //Clear invalids cuz people might be stupid
+								diffs.remove('');
+						}
+						
+						var artistTxt:FlxText = new FlxText(artistInput.x, artistInput.y - 15, 100, 'Artist/Composer:');
+						artistTxt.cameras = state.cameras;
+						var charterTxt:FlxText = new FlxText(charterInput.x, charterInput.y - 15, 100, 'Charter:');
+						charterTxt.cameras = state.cameras;
+						var difficultiesTxt:FlxText = new FlxText(difficultiesInput.x, difficultiesInput.y - 15, 100, 'Difficulties:');
+						difficultiesTxt.cameras = state.cameras;
+						state.add(artistTxt);
+						state.add(charterTxt);
+						state.add(difficultiesTxt);
+						state.add(artistInput);
+						state.add(charterInput);
+						state.add(difficultiesInput);
+					}
+				));
+			});
+		},btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_saveV2P_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			fileDialog.open('chart.json', 'Open a V-Slice Chart file', function()
+			{
+				var chart:VSliceChart = cast Json.parse(fileDialog.data);
+				if(chart == null || chart.version == null || chart.notes == null || chart.scrollSpeed == null)
+				{
+					showOutput('Error: File loaded is not a valid FNF V-Slice chart.', true);
+					return;
+				}
+
+				fileDialog.open('metadata.json', 'Open a V-Slice Metadata file', function()
+				{
+					var metadata:VSliceMetadata = cast Json.parse(fileDialog.data);
+					if(metadata == null || metadata.version == null || metadata.playData == null || metadata.songName == null ||
+						metadata.playData.difficulties == null || metadata.timeChanges == null || metadata.timeChanges.length < 1)
+					{
+						showOutput('Error: File loaded is not a valid FNF V-Slice metadata.', true);
+						return;
+					}
+
+					try
+					{
+						var pack:PsychPackage = VSlice.convertToPsych(chart, metadata);
+						if(pack.difficulties != null)
+						{
+							fileDialog.openDirectory('Save Converted Psych JSONs', function()
+							{
+								var path:String = fileDialog.path.replace('\\', '/');
+								if(!path.endsWith('/')) path += '/';
+
+								var diffs:Array<String> = metadata.playData.difficulties.copy();
+								var defaultDiff:String = Paths.formatToSongPath(Difficulty.getDefault());
+								function nextChart()
+								{
+									while(diffs.length > 0)
+									{
+										var diffName:String = diffs[0];
+										diffs.remove(diffName);
+										if(!pack.difficulties.exists(diffName)) continue;
+		
+										var diffPostfix:String = (diffName != defaultDiff) ? '-$diffName' : '';
+										var chartData:SwagSong = pack.difficulties.get(diffName);
+										var chartName:String = Paths.formatToSongPath(chartData.song) + diffPostfix + '.json';
+										overwriteCheck(path + chartName, chartName, PsychJsonPrinter.print(chartData, ['sectionNotes', 'events']), nextChart, true);
+										return;
+									}
+	
+									if(pack.events != null)
+									{
+										overwriteCheck(path + 'events.json', 'events.json', PsychJsonPrinter.print(pack.events, ['events']), function()
+										{
+											if(overwriteSavedSomething)
+												showOutput('Files saved successfully to: ${fileDialog.path}!');
+										}, true);
+									}
+									else if(overwriteSavedSomething)
+										showOutput('Files saved successfully to: ${fileDialog.path}!');
+								}
+								
+								overwriteSavedSomething = false;
+								nextChart();
+							});
+						}
+						else showOutput('Error: No difficulties found.');
+					}
+					catch(e:Exception)
+					{
+						showOutput('Error: ${e.message}', true);
+						trace(e.stack);
+					}
+				});
+			});
+		},btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+		
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_upPold_tab1'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			fileDialog.open(function()
+			{
+				var oldSong = PlayState.SONG;
+				try
+				{
+					var filePath:String = fileDialog.path.replace('\\', '/');
+					filePath = filePath.substring(filePath.lastIndexOf('/')+1, filePath.lastIndexOf('.'));
+
+					var loadedChart:SwagSong = Song.parseJSON(fileDialog.data, filePath, '');
+					if(loadedChart == null || !Reflect.hasField(loadedChart, 'song')) //Check if chart is ACTUALLY a chart and valid
+					{
+						showOutput('Error: File loaded is not a Psych Engine 0.x.x/FNF 0.2.x.x chart.', true);
+						return;
+					}
+
+					var fmt:String = loadedChart.format;
+					if(fmt == null || fmt.length < 1)
+						fmt = loadedChart.format = 'unknown';
+
+					if(!fmt.startsWith('psych_v1'))
+					{
+						loadedChart.format = 'psych_v1_convert';
+						Song.convert(loadedChart);
+						File.saveContent(fileDialog.path, PsychJsonPrinter.print(loadedChart, ['sectionNotes', 'events']));
+						showOutput('Updated "$filePath" from format "$fmt" to "psych_v1" successfully!');
+					}
+					else showOutput('Chart is already up-to-date! Format: "$fmt"', true);
+				}
+				catch(e:Exception)
+				{
+					showOutput('Error: ${e.message}', true);
+					trace(e.stack);
+				}
+			});
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+		#end
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, '${Language.get('charting_preview_tab1')} (${(controls.mobileC) ? 'C' : 'F12'})', openEditorPlayState, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+		
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, '${Language.get('charting_playtest_tab1')} (${(controls.mobileC) ? 'A' : 'ENTER'})', goToPlayState, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_exit_tab1'), function()
+		{
+			PlayState.chartingMode = false;
+			MusicBeatState.switchState(new states.editors.MasterEditorMenu());
+			FlxG.sound.playMusic(Paths.music('freakyMenu'));
+			FlxG.mouse.visible = false;
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+	}
+
+	var lockedEvents:Bool = false;
+	function addEditTab()
+	{
+		var tab = upperBox.getTab(Language.get("charting_edit_text"));
+		var tab_group = tab.menu;
+		var btnX = tab.x - upperBox.x;
+		var btnY = 1;
+		var btnWid = Std.int(tab.width);
+
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_undo_tab2'), undo, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_redo_tab2'), redo, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_selectall_tab2'), function()
+		{
+			var sel = selectedNotes;
+			selectedNotes = curRenderedNotes.members.copy();
+			addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+			onSelectNote();
+			trace('Notes selected: ' + selectedNotes.length);
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		if(SHOW_EVENT_COLUMN)
+		{
+			btnY++;
+			btnY += 20;
+			var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_lockeve_tab2'), btnWid);
+			btn.onClick = function()
+			{
+				lockedEvents = !lockedEvents;
+				if(lockedEvents) btn.text.text = Language.get('charting_unlockeve_tab2');
+				else btn.text.text = Language.get('charting_lockeve_tab2');
+				eventLockOverlay.visible = lockedEvents;
+	
+				if(selectedNotes.length >= 1)
+				{
+					var sel = selectedNotes;
+					var onlyNotes = selectedNotes.filter((note:MetaNote) -> !note.isEvent);
+					resetSelectedNotes();
+					selectedNotes = onlyNotes;
+					addUndoAction(SELECT_NOTE, {old: sel, current: selectedNotes.copy()});
+					if(selectedNotes.length == 1) onSelectNote();
+				}
+				softReloadNotes();
+			};
+			btn.text.alignment = LEFT;
+			tab_group.add(btn);
+		}
+		
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_autosaveopt_tab2'), btnWid);
+		btn.onClick = function()
+		{
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+			openSubState(new BasePrompt(400, 160, Language.get('prompt_autosave_tab'),
+				function(state:BasePrompt)
+				{
+					var btn:PsychUIButton = new PsychUIButton(state.bg.x + state.bg.width - 40, state.bg.y, 'X', state.close, 40);
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					var checkbox:PsychUICheckBox = null;
+					var timeStepper:PsychUINumericStepper = null;
+
+					timeStepper = new PsychUINumericStepper(state.bg.x + 50, state.bg.y + 90, 1, autoSaveCap, 1, 30, 0);
+					timeStepper.onValueChange = function() {
+						autoSaveTime = 0;
+						checkbox.checked = true;
+						autoSaveCap = chartEditorSave.data.autoSave = Std.int(timeStepper.value);
+					};
+					timeStepper.cameras = state.cameras;
+
+					checkbox = new PsychUICheckBox(timeStepper.x + 80, timeStepper.y, Language.get('enabled_text'), 60, function() {
+						autoSaveTime = 0;
+						autoSaveCap = chartEditorSave.data.autoSave = checkbox.checked ? Std.int(timeStepper.value) : 0;
+					});
+					checkbox.checked = (autoSaveCap > 0);
+					checkbox.cameras = state.cameras;
+					
+					var maxFileStepper:PsychUINumericStepper = new PsychUINumericStepper(checkbox.x + 140, checkbox.y, 1, backupLimit, 0, 50, 0);
+					maxFileStepper.onValueChange = function() {
+						autoSaveTime = 0;
+						checkbox.checked = true;
+						chartEditorSave.data.backupLimit = backupLimit = Std.int(maxFileStepper.value);
+					};
+					maxFileStepper.cameras = state.cameras;
+
+					var txt1:FlxText = new FlxText(timeStepper.x, timeStepper.y - 15, 100, Language.get('autosave_time'));
+					txt1.font = Language.get('uitab_font');
+					txt1.cameras = state.cameras;
+					var txt2:FlxText = new FlxText(maxFileStepper.x, maxFileStepper.y - 15, 100, Language.get('autosave_filelimit'));
+					txt2.font = Language.get('uitab_font');
+					txt2.cameras = state.cameras;
+
+					state.add(txt1);
+					state.add(txt2);
+					state.add(checkbox);
+					state.add(timeStepper);
+					state.add(maxFileStepper);
+				}
+			));
+
+		};
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_clearalln_tab2'), function()
+		{
+			var func:Void->Void = function()
+			{
+				resetSelectedNotes();
+				addUndoAction(DELETE_NOTE, {notes: notes.copy()});
+				notes = [];
+				loadSection();
+			}
+
+			if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_deleteallnote'), func));
+			else func();
+		}, btnWid);
+		btn.normalStyle.bgColor = FlxColor.RED;
+		btn.normalStyle.textColor = FlxColor.WHITE;
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		if(SHOW_EVENT_COLUMN)
+		{
+			btnY += 20;
+			var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_clearalle_tab2'), function()
+			{
+				var func:Void->Void = function()
+				{
+					resetSelectedNotes();
+					addUndoAction(DELETE_NOTE, {events: events.copy()});
+					events = [];
+					loadSection();
+				}
+	
+				if(!ignoreProgressCheckBox.checked) openSubState(new Prompt(Language.get('prompt_deleteallevent'), func));
+				else func();
+			}, btnWid);
+			btn.normalStyle.bgColor = FlxColor.RED;
+			btn.normalStyle.textColor = FlxColor.WHITE;
+			btn.text.alignment = LEFT;
+			tab_group.add(btn);
+		}
+	}
+
+	var showLastGridButton:PsychUIButton;
+	var showNextGridButton:PsychUIButton;
+	var noteTypeLabelsButton:PsychUIButton;
+	var vortexEditorButton:PsychUIButton;
+	function addViewTab()
+	{
+		var tab = upperBox.getTab(Language.get("charting_view_text"));
+		var tab_group = tab.menu;
+		var btnX = tab.x - upperBox.x;
+		var btnY = 1;
+		var btnWid = Std.int(tab.width);
+
+		if(chartEditorSave.data.waveformEnabled != null)
+			waveformEnabled = chartEditorSave.data.waveformEnabled;
+		if(chartEditorSave.data.waveformTarget != null)
+			waveformTarget = chartEditorSave.data.waveformTarget;
+		if(chartEditorSave.data.waveformColor != null)
+			waveformSprite.color = CoolUtil.colorFromString(chartEditorSave.data.waveformColor);
+
+		showLastGridButton = new PsychUIButton(btnX, btnY, '', function()
+		{
+			showPreviousSection = !showPreviousSection;
+			updateGridVisibility();
+		}, btnWid);
+		showLastGridButton.text.alignment = LEFT;
+		tab_group.add(showLastGridButton);
+
+		btnY += 20;
+		showNextGridButton = new PsychUIButton(btnX, btnY, '', function()
+		{
+			showNextSection = !showNextSection;
+			updateGridVisibility();
+		}, btnWid);
+		showNextGridButton.text.alignment = LEFT;
+		tab_group.add(showNextGridButton);
+
+		btnY++;
+		btnY += 20;
+		noteTypeLabelsButton = new PsychUIButton(btnX, btnY, '', function()
+		{
+			showNoteTypeLabels = !showNoteTypeLabels;
+			updateGridVisibility();
+		}, btnWid);
+		noteTypeLabelsButton.text.alignment = LEFT;
+		tab_group.add(noteTypeLabelsButton);
+
+		btnY++;
+		btnY += 20;
+		vortexEditorButton = new PsychUIButton(btnX, btnY, vortexEnabled ? Language.get('charting_vortexeditoron_tab3') : Language.get('charting_vortexeditoroff_tab3'), function()
+		{
+			vortexEnabled = !vortexEnabled;
+			chartEditorSave.data.vortex = vortexEnabled;
+			vortexIndicator.visible = strumLineNotes.visible = strumLineNotes.active = vortexEnabled;
+			vortexEditorButton.text.text = vortexEnabled ? Language.get('charting_vortexeditoron_tab3') : Language.get('charting_vortexeditoroff_tab3');
+
+			for (note in strumLineNotes)
+			{
+				note.playAnim('static');
+				note.resetAnim = 0;
+			}
+			opponentGridBg.vortexLineEnabled = playerGridBg.vortexLineEnabled = vortexEnabled;
+			prevOpponentGridBg.vortexLineEnabled = prevPlayerGridBg.vortexLineEnabled = vortexEnabled;
+			nextOpponentGridBg.vortexLineEnabled = nextPlayerGridBg.vortexLineEnabled = vortexEnabled;
+			if(SHOW_EVENT_COLUMN)
+			{
+				eventGridBg.vortexLineEnabled = vortexEnabled;
+				prevEventGridBg.vortexLineEnabled = vortexEnabled;
+				nextEventGridBg.vortexLineEnabled = vortexEnabled;
+			}
+		}, btnWid);
+		vortexEditorButton.text.alignment = LEFT;
+		tab_group.add(vortexEditorButton);
+
+		btnY++;
+
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_waveform_tab3'), function()
+		{
+			ClientPrefs.toggleVolumeKeys(false);
+			openSubState(new BasePrompt(320, 200, Language.get('prompt_waveform_tab'),
+				function(state:BasePrompt) {
+					upperBox.isMinimized = true;
+					upperBox.bg.visible = false;
+
+					var btn:PsychUIButton = new PsychUIButton(state.bg.x + state.bg.width - 40, state.bg.y, 'X', state.close, 40);
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					var check:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 40, state.bg.y + 80, Language.get('enabled_text'), 60);
+					check.onClick = function()
+					{
+						chartEditorSave.data.waveformEnabled = waveformEnabled = check.checked;
+						updateWaveform();
+					};
+					check.cameras = state.cameras;
+					check.checked = waveformEnabled;
+					state.add(check);
+
+					var waveformC:String = '0000FF';
+					if(chartEditorSave.data.waveformColor != null)
+						waveformC = chartEditorSave.data.waveformColor;
+
+					var input:PsychUIInputText = new PsychUIInputText(check.x, check.y + 50, 60, waveformC, 10);
+					input.onChange = function(old:String, cur:String)
+					{
+						chartEditorSave.data.waveformColor = cur;
+						waveformSprite.color = CoolUtil.colorFromString(cur);
+					}
+					input.maxLength = 6;
+					input.filterMode = ONLY_HEXADECIMAL;
+					input.cameras = state.cameras;
+					input.forceCase = UPPER_CASE;
+
+					var options:Array<WaveformTarget> = [INST, PLAYER, OPPONENT];
+					var radioGrp:PsychUIRadioGroup = new PsychUIRadioGroup(check.x + 120, check.y, [Language.get('waveform_inst'), Language.get('waveform_mainvoice'), Language.get('waveform_dadvoice')]);
+					radioGrp.cameras = state.cameras;
+					radioGrp.onClick = function()
+					{
+						waveformTarget = chartEditorSave.data.waveformTarget = options[radioGrp.checked];
+						updateWaveform();
+					};
+					radioGrp.checked = options.indexOf(waveformTarget);
+					state.add(radioGrp);
+
+					var txt1:FlxText = new FlxText(input.x, input.y - 15, 80, Language.get('waveform_color'));
+					txt1.font = Language.get('uitab_font');
+					txt1.cameras = state.cameras;
+					state.add(txt1);
+					state.add(input);
+				}
+			));
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_go2time_tab3'), function()
+		{
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+			openSubState(new BasePrompt(420, 200, Language.get('prompt_go2time_tab'),
+				function(state:BasePrompt)
+				{
+					var curTime:Float = Conductor.songPosition;
+					var currentSec:Int = curSec;
+
+					var timeStepper:PsychUINumericStepper = new PsychUINumericStepper(state.bg.x + 100, state.bg.y + 90, 1, Math.floor(curTime)/1000, 0, FlxG.sound.music.length/1000 - 0.01, 2, 80);
+					timeStepper.cameras = state.cameras;
+					var sectionStepper:PsychUINumericStepper = new PsychUINumericStepper(timeStepper.x + 160, timeStepper.y, 1, currentSec, 0, PlayState.SONG.notes.length - 1, 0);
+					sectionStepper.cameras = state.cameras;
+
+					var txt1:FlxText = new FlxText(timeStepper.x, timeStepper.y - 15, 100, Language.get('go2time_time'));
+					txt1.font = Language.get('uitab_font');
+					var txt2:FlxText = new FlxText(sectionStepper.x, sectionStepper.y - 15, 100, Language.get('go2time_section'));
+					txt2.font = Language.get('uitab_font');
+					txt1.cameras = state.cameras;
+					txt2.cameras = state.cameras;
+					state.add(txt1);
+					state.add(txt2);
+					state.add(timeStepper);
+					state.add(sectionStepper);
+
+					var timeTxt:FlxText = new FlxText(15, state.bg.y + state.bg.height - 75, 230, '', 16);
+					timeTxt.alignment = CENTER;
+					timeTxt.screenCenter(X);
+					timeTxt.cameras = state.cameras;
+					state.add(timeTxt);
+					function updateTime()
+					{
+						var tm:String = FlxStringUtil.formatTime(curTime / 1000, true);
+						var ln:String = FlxStringUtil.formatTime(FlxG.sound.music.length / 1000, true);
+						timeTxt.text = '$tm / $ln';
+					}
+					updateTime();
+
+					timeStepper.onValueChange = function()
+					{
+						curTime = timeStepper.value * 1000;
+						for (i => time in cachedSectionTimes)
+						{
+							if(time <= curTime)
+								currentSec = i;
+							else break;
+						}
+						updateTime();
+					};
+					sectionStepper.onValueChange = function()
+					{
+						currentSec = Std.int(sectionStepper.value);
+						curTime = cachedSectionTimes[currentSec] + 0.000001;
+						updateTime();
+					};
+
+					var btn:PsychUIButton = new PsychUIButton(0, timeTxt.y + 30, 'Go To', function()
+					{
+						curSec = currentSec;
+						FlxG.sound.music.time = FlxMath.bound(curTime, 0, FlxG.sound.music.length - 1);
+						loadSection();
+						state.close();
+					});
+					btn.cameras = state.cameras;
+					btn.screenCenter(X);
+					btn.x -= 60;
+					state.add(btn);
+
+					var btn:PsychUIButton = new PsychUIButton(0, btn.y, 'Cancel', state.close);
+					btn.cameras = state.cameras;
+					btn.screenCenter(X);
+					btn.x += 60;
+					state.add(btn);
+				}
+			));
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_theme_tab3'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			openSubState(new BasePrompt(500, 260, Language.get('prompt_theme_tab'),
+				function(state:BasePrompt)
+				{
+					var btn:PsychUIButton = new PsychUIButton(state.bg.x + state.bg.width - 40, state.bg.y, 'X', state.close, 40);
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					var btnY = 320;
+					var btn:PsychUIButton = new PsychUIButton(0, btnY, Language.get('theme_light'), changeTheme.bind(LIGHT));
+					btn.screenCenter(X);
+					btn.x -= 180;
+					btn.cameras = state.cameras;
+					state.add(btn);
+			
+					var btn:PsychUIButton = new PsychUIButton(0, btnY, Language.get('theme_dark'), changeTheme.bind(DARK));
+					btn.screenCenter(X);
+					btn.x -= 60;
+					btn.cameras = state.cameras;
+					state.add(btn);
+					
+					var btn:PsychUIButton = new PsychUIButton(0, btnY, Language.get('theme_default'), changeTheme.bind(DEFAULT));
+					btn.screenCenter(X);
+					btn.cameras = state.cameras;
+					btn.x += 60;
+					state.add(btn);
+			
+					var btn:PsychUIButton = new PsychUIButton(0, btnY, Language.get('theme_vslice'), changeTheme.bind(VSLICE));
+					btn.screenCenter(X);
+					btn.x += 180;
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					btnY += 60;
+					var btn:PsychUIButton = new PsychUIButton(0, btnY, Language.get('theme_custom'), changeTheme.bind(CUSTOM));
+					btn.screenCenter(X);
+					btn.x -= 180;
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					var customBgC:String = '303030';
+					if(chartEditorSave.data.customBgColor != null)
+						customBgC = chartEditorSave.data.customBgColor;
+
+					var input:PsychUIInputText = new PsychUIInputText(0, btnY, 80, customBgC, 10);
+					input.maxLength = 6;
+					input.filterMode = ONLY_HEXADECIMAL;
+					input.forceCase = UPPER_CASE;
+					input.screenCenter(X);
+					input.x -= 60;
+					input.cameras = state.cameras;
+					input.onChange = function(old:String, cur:String)
+					{
+						chartEditorSave.data.customBgColor = cur;
+						changeTheme(CUSTOM);
+					}
+
+					var txt:FlxText = new FlxText(input.x, input.y - 15, 120, Language.get('theme_bgcolor'));
+					txt.font = Language.get('uitab_font');
+					txt.cameras = state.cameras;
+					state.add(txt);
+					state.add(input);
+
+					var customGridC:Array<String> = ['DFDFDF', 'BFBFBF'];
+					if(chartEditorSave.data.customGridColors != null && chartEditorSave.data.customGridColors.length > 1)
+						customGridC = chartEditorSave.data.customGridColors;
+
+					var input:PsychUIInputText = new PsychUIInputText(0, btnY, 80, customGridC[0], 10);
+					input.maxLength = 6;
+					input.filterMode = ONLY_HEXADECIMAL;
+					input.forceCase = UPPER_CASE;
+					input.screenCenter(X);
+					input.x += 60;
+					input.cameras = state.cameras;
+					input.onChange = function(old:String, cur:String)
+					{
+						chartEditorSave.data.customGridColors[0] = cur;
+						changeTheme(CUSTOM);
+					}
+
+					var txt:FlxText = new FlxText(input.x, input.y - 15, 120, Language.get('theme_gridcolor'));
+					txt.font = Language.get('uitab_font');
+					txt.cameras = state.cameras;
+					state.add(txt);
+					state.add(input);
+
+					var input:PsychUIInputText = new PsychUIInputText(0, btnY + 30, 80, customGridC[1], 10);
+					input.maxLength = 6;
+					input.filterMode = ONLY_HEXADECIMAL;
+					input.forceCase = UPPER_CASE;
+					input.screenCenter(X);
+					input.x += 60;
+					input.cameras = state.cameras;
+					input.onChange = function(old:String, cur:String)
+					{
+						chartEditorSave.data.customGridColors[1] = cur;
+						changeTheme(CUSTOM);
+					}
+					state.add(input);
+
+					var customGridOtherC:Array<String> = ['5F5F5F', '4A4A4A'];
+					if(chartEditorSave.data.customNextGridColors != null && chartEditorSave.data.customNextGridColors.length > 1)
+						customGridOtherC = chartEditorSave.data.customNextGridColors;
+
+					var input:PsychUIInputText = new PsychUIInputText(0, btnY, 80, customGridOtherC[0], 10);
+					input.maxLength = 6;
+					input.filterMode = ONLY_HEXADECIMAL;
+					input.forceCase = UPPER_CASE;
+					input.screenCenter(X);
+					input.x += 180;
+					input.cameras = state.cameras;
+					input.onChange = function(old:String, cur:String)
+					{
+						chartEditorSave.data.customNextGridColors[0] = cur;
+						changeTheme(CUSTOM);
+					}
+
+					var txt:FlxText = new FlxText(input.x, input.y - 15, 120, Language.get('theme_ngridcolor'));
+					txt.font = Language.get('uitab_font');
+					txt.cameras = state.cameras;
+					state.add(txt);
+					state.add(input);
+
+					var input:PsychUIInputText = new PsychUIInputText(0, btnY + 30, 80, customGridOtherC[1], 10);
+					input.maxLength = 6;
+					input.filterMode = ONLY_HEXADECIMAL;
+					input.forceCase = UPPER_CASE;
+					input.screenCenter(X);
+					input.x += 180;
+					input.cameras = state.cameras;
+					input.onChange = function(old:String, cur:String)
+					{
+						chartEditorSave.data.customNextGridColors[1] = cur;
+						changeTheme(CUSTOM);
+					}
+					state.add(input);
+
+				}
+			));
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY++;
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_visualeffects_tab3'), function()
+		{
+			if(!fileDialog.completed) return;
+			upperBox.isMinimized = true;
+			upperBox.bg.visible = false;
+
+			openSubState(new BasePrompt(450, 400, Language.get('prompt_visualeffects_tab'),
+				function(state:BasePrompt)
+				{
+					var btn:PsychUIButton = new PsychUIButton(state.bg.x + state.bg.width - 40, state.bg.y, 'X', state.close, 40);
+					btn.cameras = state.cameras;
+					state.add(btn);
+
+					// 初始化变量（从保存数据中读取）
+					if(chartEditorSave.data.iconBopEnabled != null)
+						iconBopEnabled = chartEditorSave.data.iconBopEnabled;
+					if(chartEditorSave.data.bgBopEnabled != null)
+						bgBopEnabled = chartEditorSave.data.bgBopEnabled;
+					if(chartEditorSave.data.mustHitTweenEnabled != null)
+						mustHitTweenEnabled = chartEditorSave.data.mustHitTweenEnabled;
+					if(chartEditorSave.data.showTrackColors == null)
+						chartEditorSave.data.showTrackColors = true;
+					if(chartEditorSave.data.showTrackSeparators == null)
+						chartEditorSave.data.showTrackSeparators = true;
+
+
+					var checkY = 100;
+
+					// 小图标跳动
+					var iconBopCheckBox:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_iconbop'), 200);
+					iconBopCheckBox.checked = iconBopEnabled;
+					iconBopCheckBox.onClick = function()
+					{
+						iconBopEnabled = chartEditorSave.data.iconBopEnabled = iconBopCheckBox.checked;
+						chartEditorSave.flush();
+					};
+					iconBopCheckBox.cameras = state.cameras;
+					state.add(iconBopCheckBox);
+					checkY += 30;
+
+					// 背景跳动
+					var bgBopCheckBox:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_bgbop'), 200);
+					bgBopCheckBox.checked = bgBopEnabled;
+					bgBopCheckBox.onClick = function()
+					{
+						bgBopEnabled = chartEditorSave.data.bgBopEnabled = bgBopCheckBox.checked;
+						chartEditorSave.flush();
+						if(!bgBopEnabled && bgBopTween != null)
+						{
+							bgBopTween.cancel();
+							bgBopTween = null;
+							bg.scale.set(1.0, 1.0);
+						}
+					};
+					bgBopCheckBox.cameras = state.cameras;
+					state.add(bgBopCheckBox);
+					checkY += 30;
+
+					// 倒三角tween
+					var mustHitTweenCheckBox:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_musthittween'), 200);
+					mustHitTweenCheckBox.checked = mustHitTweenEnabled;
+					mustHitTweenCheckBox.onClick = function()
+					{
+						mustHitTweenEnabled = chartEditorSave.data.mustHitTweenEnabled = mustHitTweenCheckBox.checked;
+						chartEditorSave.flush();
+						if(!mustHitTweenEnabled)
+							FlxTween.cancelTweensOf(mustHitIndicator);
+					};
+					mustHitTweenCheckBox.cameras = state.cameras;
+					state.add(mustHitTweenCheckBox);
+					checkY += 30;
+
+					// 轨道颜色
+					var trackColorsCheckBox2:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_trackcolors'), 200);
+					trackColorsCheckBox2.checked = chartEditorSave.data.showTrackColors;
+					trackColorsCheckBox2.onClick = function()
+					{
+						chartEditorSave.data.showTrackColors = trackColorsCheckBox2.checked;
+						chartEditorSave.flush();
+						// 立即应用设置
+						if(playerTrackOverlay != null) playerTrackOverlay.visible = trackColorsCheckBox2.checked;
+						if(opponentTrackOverlay != null) opponentTrackOverlay.visible = trackColorsCheckBox2.checked;
+						if(eventTrackOverlay != null) eventTrackOverlay.visible = trackColorsCheckBox2.checked;
+					};
+					trackColorsCheckBox2.cameras = state.cameras;
+					state.add(trackColorsCheckBox2);
+					checkY += 30;
+
+					// 轨道分隔线
+					var trackSeparatorsCheckBox:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('charting_showseparators_text'), 200);
+					trackSeparatorsCheckBox.checked = chartEditorSave.data.showTrackSeparators;
+					trackSeparatorsCheckBox.onClick = function()
+					{
+						chartEditorSave.data.showTrackSeparators = trackSeparatorsCheckBox.checked;
+						chartEditorSave.flush();
+						// 立即应用设置
+						for (separator in trackSeparators)
+						{
+							if(separator != null) separator.visible = trackSeparatorsCheckBox.checked;
+						}
+					};
+					trackSeparatorsCheckBox.cameras = state.cameras;
+					state.add(trackSeparatorsCheckBox);
+					checkY += 30;
+
+
+					// 显示角色
+					var showCharacterCheckBox:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_showcharacter'), 200);
+					showCharacterCheckBox.checked = showCharactersCheckBox.checked;
+					showCharacterCheckBox.onClick = function()
+					{
+						if(dad != null) dad.visible = showCharacterCheckBox.checked;
+						if(boyfriend != null) boyfriend.visible = showCharacterCheckBox.checked;
+						if(showHitboxCheckBox != null)
+						{
+							dadHitboxSprites.visible = showHitboxCheckBox.checked && showCharacterCheckBox.checked;
+							boyfriendHitboxSprites.visible = showHitboxCheckBox.checked && showCharacterCheckBox.checked;
+						}
+					};
+					showCharacterCheckBox.cameras = state.cameras;
+					state.add(showCharacterCheckBox);
+					checkY += 30;
+
+					// 碰撞箱
+					var showHitboxCheckBox2:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_hitbox'), 200);
+					showHitboxCheckBox2.checked = showHitboxCheckBox.checked;
+					showHitboxCheckBox2.onClick = function()
+					{
+						showHitboxCheckBox.checked = showHitboxCheckBox2.checked;
+						dadHitboxSprites.visible = showHitboxCheckBox.checked && dad.visible;
+						boyfriendHitboxSprites.visible = showHitboxCheckBox.checked && boyfriend.visible;
+					};
+					showHitboxCheckBox2.cameras = state.cameras;
+					state.add(showHitboxCheckBox2);
+					checkY += 30;
+
+					// 可拖动角色
+					var dragCharacterCheckBox2:PsychUICheckBox = new PsychUICheckBox(state.bg.x + 20, checkY, Language.get('visualeffect_dragcharacter'), 200);
+					dragCharacterCheckBox2.checked = dragCharactersCheckBox.checked;
+					dragCharacterCheckBox2.onClick = function()
+					{
+						dragCharactersCheckBox.checked = dragCharacterCheckBox2.checked;
+					};
+					dragCharacterCheckBox2.cameras = state.cameras;
+					state.add(dragCharacterCheckBox2);
+
+					var btnY = 350;
+					var btn:PsychUIButton = new PsychUIButton(0, btnY, 'OK', state.close);
+					btn.screenCenter(X);
+					btn.cameras = state.cameras;
+					state.add(btn);
+				}
+			));
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+
+		btnY += 20;
+		var btn:PsychUIButton = new PsychUIButton(btnX, btnY, Language.get('charting_resetuibox_tab3'), function()
+		{
+			mainBox.setPosition(mainBoxPosition.x, mainBoxPosition.y);
+			infoBox.setPosition(infoBoxPosition.x, infoBoxPosition.y);
+			UIEvent(PsychUIBox.DROP_EVENT, btn); //to force a save
+		}, btnWid);
+		btn.text.alignment = LEFT;
+		tab_group.add(btn);
+	}
+
+	function updateChartData()
+	{
+		for (secNum => section in PlayState.SONG.notes)
+			PlayState.SONG.notes[secNum].sectionNotes = [];
+
+		notes.sort(PlayState.sortByTime);
+		var noteSec:Int = 0;
+		var nextSectionTime:Float = cachedSectionTimes[noteSec + 1];
+		var curSectionTime:Float = cachedSectionTimes[noteSec];
+
+		for (num => note in notes)
+		{
+			if(note == null) continue;
+
+			while(cachedSectionTimes[noteSec + 1] <= note.strumTime)
+			{
+				noteSec++;
+				nextSectionTime = cachedSectionTimes[noteSec + 1];
+				curSectionTime = cachedSectionTimes[noteSec];
+			}
+
+			var arr:Array<Dynamic> = PlayState.SONG.notes[noteSec].sectionNotes;
+			//trace('Added note with time ${note.songData[0]} at section $noteSec');
+			arr.push(note.songData);
+		}
+
+		// 排序：先按时间，再按轨道索引（最左侧轨道优先）
+		events.sort(function(a:EventMetaNote, b:EventMetaNote):Int {
+			var timeDiff = a.strumTime - b.strumTime;
+			if(Math.abs(timeDiff) > 0.0001) {
+				return timeDiff > 0 ? 1 : -1;
+			}
+			// 同一时间点，按轨道索引排序，最左侧轨道(0)优先
+			return a.eventTrackIndex - b.eventTrackIndex;
+		});
+		PlayState.SONG.events = [];
+		for (event in events)
+			PlayState.SONG.events.push(event.songData);
+	}
+
+	function saveChart(canQuickSave:Bool = true)
+	{
+		updateChartData();
+		var chartData:String = PsychJsonPrinter.print(PlayState.SONG, ['sectionNotes', 'events']);
+		if(canQuickSave && Song.chartPath != null)
+		{
+			#if mobile
+			var chartName:String = Paths.formatToSongPath(PlayState.SONG.song) + '.json';
+			StorageUtil.saveContent(chartName, chartData);
+			#else
+			File.saveContent(Song.chartPath, chartData);
+			showOutput('Chart saved successfully to: ${Song.chartPath}');
+			#end
+		}
+		else
+		{
+			var chartName:String = Paths.formatToSongPath(PlayState.SONG.song) + '.json';
+			if(Song.chartPath != null) chartName = Song.chartPath.substr(Song.chartPath.lastIndexOf('/')).trim();
+			#if mobile
+			StorageUtil.saveContent(chartName, chartData);
+			#else
+			fileDialog.save(chartName, chartData,
+				function()
+				{
+					var newPath:String = fileDialog.path;
+					Song.chartPath = newPath.replace('\\', '/');
+					reloadNotesDropdowns();
+					showOutput('Chart saved successfully to: $newPath');
+
+				}, null, function() showOutput('Error on saving chart!', true));
+			#end
+		}
+	}
+	
+	inline function getCurChartSection()
+	{
+		return PlayState.SONG.notes != null ? PlayState.SONG.notes[curSec] : null;
+	}
+
+	function updateNotesRGB()
+	{
+		PlayState.SONG.disableNoteRGB = noRGBCheckBox.checked;
+
+		for (note in notes)
+		{
+			if(note == null) continue;
+
+			note.rgbShader.enabled = !noRGBCheckBox.checked;
+			if(note.rgbShader.enabled)
+			{
+				var data = backend.NoteTypesConfig.loadNoteTypeData(note.noteType);
+				if(data == null || data.length < 1) continue;
+
+				for (line in data)
+				{
+					var prop:String = line.property.join('.');
+					if(prop == 'rgbShader.enabled')
+						note.rgbShader.enabled = line.value;
+				}
+			}
+		}
+
+		for (note in strumLineNotes)
+			note.rgbShader.enabled = !noRGBCheckBox.checked;
+	}
+
+	function updateGridVisibility()
+	{
+		showLastGridButton.text.text = showPreviousSection	? Language.get('charting_hidelastsec_tab3') :  Language.get('charting_showlastsec_tab3');
+		showNextGridButton.text.text = showNextSection		? Language.get('charting_hidenextsec_tab3') :  Language.get('charting_shownextsec_tab3');
+
+		prevOpponentGridBg.visible = (curSec > 0 && showPreviousSection);
+		nextOpponentGridBg.visible = (curSec < PlayState.SONG.notes.length - 1 && showNextSection);
+		if(SHOW_EVENT_COLUMN)
+		{
+			prevEventGridBg.visible = (curSec > 0 && showPreviousSection);
+			nextEventGridBg.visible = (curSec < PlayState.SONG.notes.length - 1 && showNextSection);
+		}
+		prevPlayerGridBg.visible = (curSec > 0 && showPreviousSection);
+		nextPlayerGridBg.visible = (curSec < PlayState.SONG.notes.length - 1 && showNextSection);
+
+		noteTypeLabelsButton.text.text = showNoteTypeLabels ? Language.get('charting_hidenlab_tab3') : Language.get('charting_shownlab_tab3');
+		for (num => text in MetaNote.noteTypeTexts)
+			text.visible = showNoteTypeLabels;
+		softReloadNotes();
+	}
+
+	function adaptNotesToNewTimes(oldTimes:Array<Float>)
+	{
+		undoActions = [];
+		setSongPlaying(false);
+		var gridLerp:Float = FlxMath.bound((scrollY + FlxG.height/2 - opponentGridBg.y) / opponentGridBg.height, 0.000001, 0.999999);
+		notes.sort(PlayState.sortByTime);
+		_cacheSections();
+
+		var noteSec:Int = 0;
+		var oldNextSectionTime:Float = oldTimes[noteSec + 1];
+		var oldCurSectionTime:Float = oldTimes[noteSec];
+		var nextSectionTime:Float = cachedSectionTimes[noteSec + 1];
+		var curSectionTime:Float = cachedSectionTimes[noteSec];
+
+		for (num => note in notes)
+		{
+			if(note == null || note.strumTime <= 0) continue;
+
+			while(noteSec + 2 < oldTimes.length && oldTimes[noteSec + 1] <= note.strumTime)
+			{
+				noteSec++;
+				oldNextSectionTime = oldTimes[noteSec + 1];
+				oldCurSectionTime = oldTimes[noteSec];
+				nextSectionTime = cachedSectionTimes[noteSec + 1];
+				curSectionTime = cachedSectionTimes[noteSec];
+
+				if(noteSec + 1 >= cachedSectionTimes.length)
+				{
+					trace('failsafe, cancel early and delete notes after this');
+					var changedSelected:Bool = false;
+					for(i in num...notes.length)
+					{
+						var n = notes[num];
+						if(n != null)
+						{
+							if(selectedNotes.contains(n))
+							{
+								selectedNotes.remove(n);
+								changedSelected = true;
+							}
+							notes.remove(n);
+							note.destroy();
+						}
+					}
+					if(changedSelected) onSelectNote();
+					loadSection();
+					return;
+				}
+				//trace('changed section: $noteSec, $oldNextSectionTime, $oldCurSectionTime, $nextSectionTime, $curSectionTime');
+			}
+
+			var shouldBound:Bool = (note.strumTime >= oldCurSectionTime && note.strumTime < oldNextSectionTime);
+			var strumTime:Float = note.strumTime;
+
+			var ratio:Float = (nextSectionTime - curSectionTime) / (oldNextSectionTime - oldCurSectionTime);
+			var adaptedStrumTime:Float = ((note.strumTime - oldCurSectionTime) * ratio) + curSectionTime;
+			note.setStrumTime(adaptedStrumTime);
+			if(shouldBound)
+				note.setStrumTime(FlxMath.bound(note.strumTime, curSectionTime, nextSectionTime));
+
+			positionNoteYOnTime(note, noteSec);
+			note.updateSustainToStepCrochet(cachedSectionCrochets[noteSec] / 4);
+		}
+		
+		for (event in events)
+		{
+			var secNum:Int = 0;
+			for (time in cachedSectionTimes)
+			{
+				if(time > event.strumTime) break;
+				secNum++;
+			}
+			positionNoteYOnTime(event, secNum);
+		}
+		
+		var time:Float = FlxMath.remapToRange(gridLerp, 0, 1, cachedSectionTimes[curSec], cachedSectionTimes[curSec + 1]);
+		if(Math.isNaN(time))
+		{
+			time = 0;
+			curSec = 0;
+		}
+		
+		if(FlxG.sound.music != null && time >= FlxG.sound.music.length)
+		{
+			time = FlxG.sound.music.length - 1;
+			curSec = PlayState.SONG.notes.length - 1;
+		}
+		FlxG.sound.music.time = time;
+		Conductor.songPosition = time;
+		forceDataUpdate = true;
+		loadSection();
+	}
+
+	public function UIEvent(id:String, sender:Dynamic)
+	{
+		//trace(id, sender);
+		switch(id)
+		{
+			case PsychUIButton.CLICK_EVENT, PsychUIDropDownMenu.CLICK_EVENT:
+				ignoreClickForThisFrame = true;
+
+			case PsychUIBox.CLICK_EVENT:
+				ignoreClickForThisFrame = true;
+				if(sender == upperBox) updateUpperBoxBg();
+
+			case PsychUIBox.MINIMIZE_EVENT:
+				if(sender == upperBox)
+				{
+					upperBox.bg.visible = !upperBox.isMinimized;
+					updateUpperBoxBg();
+				}
+
+			case PsychUIBox.DROP_EVENT:
+				chartEditorSave.data.mainBoxPosition = [mainBox.x, mainBox.y];
+				chartEditorSave.data.infoBoxPosition = [infoBox.x, infoBox.y];
+		}
+	}
+
+	function updateUpperBoxBg()
+	{
+		if(upperBox.selectedTab != null)
+		{
+			var menu = upperBox.selectedTab.menu;
+			upperBox.bg.x = upperBox.x + upperBox.selectedIndex * (upperBox.width/upperBox.tabs.length);
+			upperBox.bg.setGraphicSize(menu.width, menu.height + 21);
+			upperBox.bg.updateHitbox();
+		}
+	}
+
+	function openEditorPlayState()
+	{
+		if(FlxG.sound.music == null)
+		{
+			showOutput('Load a valid song to preview!', true);
+			return;
+		}
+		setSongPlaying(false);
+		chartEditorSave.flush(); //just in case a random crash happens before loading
+
+		openSubState(new EditorPlayState(cast notes, [vocals, opponentVocals]));
+		upperBox.isMinimized = true;
+		upperBox.visible = mainBox.visible = infoBox.visible = false;
+	}
+
+	function goToPlayState()
+	{
+		persistentUpdate = false;
+		FlxG.mouse.visible = false;
+		chartEditorSave.flush();
+
+		setSongPlaying(false);
+		updateChartData();
+		StageData.loadDirectory(PlayState.SONG);
+		LoadingState.loadAndSwitchState(new PlayState());
+		ClientPrefs.toggleVolumeKeys(true);
+	}
+	
+	override function openSubState(SubState:FlxSubState)
+	{
+		if(!persistentUpdate) setSongPlaying(false);
+		super.openSubState(SubState);
+	}
+
+	override function closeSubState()
+	{
+		ClientPrefs.toggleVolumeKeys(true);
+		super.closeSubState();
+		upperBox.isMinimized = true;
+		upperBox.visible = mainBox.visible = infoBox.visible = true;
+		upperBox.bg.visible = false;
+		updateAudioVolume();
+	}
+
+	override function destroy()
+	{
+		Note.globalRgbShaders = [];
+		backend.NoteTypesConfig.clearNoteTypesData();
+
+		for (num => text in MetaNote.noteTypeTexts)
+			text.destroy();
+
+		MetaNote.noteTypeTexts = [];
+		fileDialog.destroy();
+		super.destroy();
+	}
+
+	function loadFileList(mainFolder:String, ?optionalList:String = null, ?fileTypes:Array<String> = null)
+	{
+		if(fileTypes == null) fileTypes = ['.json'];
+
+		var fileList:Array<String> = [];
+		if(optionalList != null)
+		{
+			for (file in Mods.mergeAllTextsNamed(optionalList))
+			{
+				file = file.trim();
+				if(file.length > 0 && !fileList.contains(file))
+					fileList.push(file);
+			}
+		}
+
+		for (directory in Mods.directoriesWithFile(Paths.getSharedPath(), mainFolder))
+		{
+			for (file in Paths.readDirectory(directory))
+			{
+				var path = haxe.io.Path.join([directory, file.trim()]);
+				if (!FileSystem.isDirectory(path) && !file.startsWith('readme.'))
+				{
+					for (fileType in fileTypes)
+					{
+						var fileToCheck:String = file.substr(0, file.length - fileType.length);
+						if(fileToCheck.length > 0 && path.endsWith(fileType) && !fileList.contains(fileToCheck))
+						{
+							fileList.push(fileToCheck);
+							break;
+						}
+					}
+				}
+			}
+		}
+		return fileList;
+	}
+	
+	function loadCharacterFile(char:String):CharacterFile
+	{
+		if(char != null)
+		{
+			try
+			{
+				var path:String = Paths.getPath('characters/' + char + '.json', TEXT);
+				#if MODS_ALLOWED
+				var unparsedJson = File.getContent(path);
+				#else
+				var unparsedJson = Assets.getText(path);
+				#end
+				return cast Json.parse(unparsedJson);
+			}
+			catch (e:Dynamic) {}
+		}
+		return null;
+	}
+	
+	var overwriteSavedSomething:Bool = false;
+	function overwriteCheck(savePath:String, overwriteName:String, saveData:String, continueFunc:Void->Void = null, ?continueOnCancel:Bool = false)
+	{
+		if(FileSystem.exists(savePath))
+		{
+			openSubState(new Prompt('Overwrite: "$overwriteName"?', function()
+			{
+				overwriteSavedSomething = true;
+				File.saveContent(savePath, saveData);
+				if(continueFunc != null) continueFunc();
+			},
+			continueOnCancel ? (function() if(continueFunc != null) continueFunc()) : null));
+		}
+		else
+		{
+			overwriteSavedSomething = true;
+			File.saveContent(savePath, saveData);
+			if(continueFunc != null) continueFunc();
+		}
+	}
+
+	// Undo/Redo stuff
+	var undoActions:Array<UndoStruct> = [];
+	var currentUndo:Int = 0;
+	function addUndoAction(action:UndoAction, data:Dynamic)
+	{
+		function destroyFromArr(arr:Array<MetaNote>)
+		{
+			if(arr == null || arr.length < 1) return;
+
+			for (note in arr)
+				if(note != null)
+					note.destroy();
+		}
+
+		//trace('pushed action: $action');
+		if(currentUndo > 0) undoActions = undoActions.slice(currentUndo);
+		currentUndo = 0;
+		undoActions.insert(0, {action: action, data: data});
+		while(undoActions.length > 15)
+		{
+			var lastAction:UndoStruct = undoActions.pop();
+			if(lastAction != null)
+			{
+				switch(lastAction.action)
+				{
+					case DELETE_NOTE:
+						destroyFromArr(lastAction.data.notes);
+						destroyFromArr(lastAction.data.events);
+					case MOVE_NOTE:
+						destroyFromArr(lastAction.data.originalNotes);
+						destroyFromArr(lastAction.data.originalEvents);
+					default:
+				}
+			}
+		}
+	}
+
+	function undo()
+	{
+		if(isMovingNotes || currentUndo >= undoActions.length)
+		{
+			FlxG.sound.play(Paths.sound('cancelMenu'), 0.4);
+			return;
+		}
+
+		var action:UndoStruct = undoActions[currentUndo];
+		switch(action.action)
+		{
+			case ADD_NOTE:
+				actionRemoveNotes(action.data.notes, action.data.events);
+
+			case DELETE_NOTE:
+				actionPushNotes(action.data.notes, action.data.events);
+
+			case MOVE_NOTE:
+				actionRemoveNotes(action.data.movedNotes, action.data.movedEvents);
+				actionPushNotes(action.data.originalNotes, action.data.originalEvents);
+				onSelectNote();
+
+			case SELECT_NOTE:
+				resetSelectedNotes();
+				selectedNotes = action.data.old;
+				if(lockedEvents) selectedNotes = selectedNotes.filter((note:MetaNote) -> !note.isEvent);
+				onSelectNote();
+		}
+		showOutput('Undo #${currentUndo+1}: ${action.action}');
+		FlxG.sound.play(Paths.sound('scrollMenu'), 0.4);
+		currentUndo++;
+	}
+	function redo()
+	{
+		if(isMovingNotes || currentUndo < 1)
+		{
+			FlxG.sound.play(Paths.sound('cancelMenu'), 0.4);
+			return;
+		}
+
+		currentUndo--;
+		var action:UndoStruct = undoActions[currentUndo];
+		switch(action.action)
+		{
+			case ADD_NOTE:
+				actionPushNotes(action.data.notes, action.data.events);
+
+			case DELETE_NOTE:
+				actionRemoveNotes(action.data.notes, action.data.events);
+
+			case MOVE_NOTE:
+				actionRemoveNotes(action.data.originalNotes, action.data.originalEvents);
+				actionPushNotes(action.data.movedNotes, action.data.movedEvents);
+				onSelectNote();
+
+			case SELECT_NOTE:
+				resetSelectedNotes();
+				selectedNotes = action.data.current;
+				if(lockedEvents) selectedNotes = selectedNotes.filter((note:MetaNote) -> !note.isEvent);
+				onSelectNote();
+		}
+		showOutput('Redo #${currentUndo+1}: ${action.action}');
+		FlxG.sound.play(Paths.sound('scrollMenu'), 0.4);
+	}
+
+	function actionPushNotes(dataNotes:Array<MetaNote>, dataEvents:Array<EventMetaNote>)
+	{
+		resetSelectedNotes();
+		if(dataNotes != null && dataNotes.length > 0)
+		{
+			for (note in dataNotes)
+			{
+				if(note != null)
+				{
+					notes.push(note);
+					selectedNotes.push(note);
+					note.songData[0] = note.strumTime;
+					note.songData[1] = note.chartNoteData;
+				}
+			}
+			notes.sort(PlayState.sortByTime);
+		}
+		if(dataEvents != null && dataEvents.length > 0)
+		{
+			for (event in dataEvents)
+			{
+				if(event != null)
+				{
+					events.push(event);
+					selectedNotes.push(event);
+					event.songData[0] = event.strumTime;
+				}
+			}
+			events.sort(PlayState.sortByTime);
+		}
+		softReloadNotes();
+	}
+
+	function actionRemoveNotes(dataNotes:Array<MetaNote>, dataEvents:Array<EventMetaNote>)
+	{
+		if(dataNotes != null && dataNotes.length > 0)
+		{
+			for (note in dataNotes)
+			{
+				if(note != null)
+				{
+					notes.remove(note);
+					selectedNotes.remove(note);
+
+					if(note.exists)
+					{
+						note.colorTransform.redMultiplier = note.colorTransform.greenMultiplier = note.colorTransform.blueMultiplier = 1;
+						if(note.animation.curAnim != null) note.animation.curAnim.curFrame = 0;
+					}
+				}
+
+			}
+		}
+		if(dataEvents != null && dataEvents.length > 0)
+		{
+			for (event in dataEvents)
+			{
+				if(event != null)
+				{
+					trace(events.remove(event));
+					selectedNotes.remove(event);
+
+					if(event.exists)
+					{
+						event.colorTransform.redMultiplier = event.colorTransform.greenMultiplier = event.colorTransform.blueMultiplier = 1;
+						if(event.animation.curAnim != null) event.animation.curAnim.curFrame = 0;
+					}
+				}
+			}
+		}
+		softReloadNotes();
+	}
+
+	function actionReplaceNotes(oldNote:MetaNote, newNote:MetaNote)
+	{
+		for (act in undoActions)
+		{
+			for (field in Reflect.fields(act.data))
+			{
+				var fld:Array<MetaNote> = cast Reflect.field(act.data, field);
+				if(fld != null && fld.length > 0)
+					for (num => actNote in fld)
+						if(actNote == oldNote)
+							fld[num] = newNote;
+			}
+		}
+	}
+
+	// Ported from the old chart editor
+	var wavData:Array<Array<Array<Float>>> = [[[0], [0]], [[0], [0]]];
+	function updateWaveform() {
+		#if (lime_cffi && !macro)
+		if(curSec < 0 || curSec >= cachedSectionTimes.length || !waveformEnabled)
+		{
+			waveformSprite.visible = false;
+			return;
+		}
+
+
+		waveformSprite.visible = true;
+		waveformSprite.y = opponentGridBg.y;
+		var gridLayout = getGridLayout();
+		var waveformX:Float;
+		var width:Int;
+		var height:Int = Std.int(opponentGridBg.height);
+		
+		switch(waveformTarget)
+		{
+			case INST:
+				waveformX = gridLayout.eventX;
+				width = Std.int(GRID_SIZE * EVENT_TRACK_COUNT);
+			case PLAYER:
+				waveformX = gridLayout.playerX;
+				width = Std.int(GRID_SIZE * GRID_COLUMNS_PER_PLAYER);
+			case OPPONENT:
+				waveformX = gridLayout.opponentX;
+				width = Std.int(GRID_SIZE * GRID_COLUMNS_PER_PLAYER);
+		}
+		waveformSprite.x = waveformX;
+		if(Std.int(waveformSprite.height) != height && waveformSprite.pixels != null)
+		{
+			waveformSprite.pixels.dispose();
+			waveformSprite.pixels.disposeImage();
+			waveformSprite.makeGraphic(width, height, 0x00FFFFFF);
+
+		}
+		waveformSprite.pixels.fillRect(new Rectangle(0, 0, width, height), 0x00FFFFFF);
+
+		wavData[0][0].resize(0);
+		wavData[0][1].resize(0);
+		wavData[1][0].resize(0);
+		wavData[1][1].resize(0);
+
+		var sound:FlxSound = switch(waveformTarget)
+		{
+			case INST:
+				FlxG.sound.music;
+			case PLAYER:
+				vocals;
+			case OPPONENT:
+				opponentVocals;
+			default:
+				null;
+		}
+		
+		@:privateAccess
+		if (sound != null && sound._sound != null && sound._sound.__buffer != null)
+		{
+			var bytes:Bytes = sound._sound.__buffer.data.toBytes();
+			wavData = waveformData(sound._sound.__buffer, bytes, cachedSectionTimes[curSec] - Conductor.offset, cachedSectionTimes[curSec+1] - Conductor.offset, 1, wavData, height);
+		}
+
+		// Draws
+		var gSize:Int = width;
+		var hSize:Int = Std.int(gSize / 2);
+		var size:Float = 1;
+
+		var leftLength:Int = (wavData[0][0].length > wavData[0][1].length ? wavData[0][0].length : wavData[0][1].length);
+		var rightLength:Int = (wavData[1][0].length > wavData[1][1].length ? wavData[1][0].length : wavData[1][1].length);
+
+		var length:Int = leftLength > rightLength ? leftLength : rightLength;
+
+		for (index in 0...length)
+		{
+			var lmin:Float = FlxMath.bound(((index < wavData[0][0].length && index >= 0) ? wavData[0][0][index] : 0) * (gSize / 1.12), -hSize, hSize) / 2;
+			var lmax:Float = FlxMath.bound(((index < wavData[0][1].length && index >= 0) ? wavData[0][1][index] : 0) * (gSize / 1.12), -hSize, hSize) / 2;
+
+			var rmin:Float = FlxMath.bound(((index < wavData[1][0].length && index >= 0) ? wavData[1][0][index] : 0) * (gSize / 1.12), -hSize, hSize) / 2;
+			var rmax:Float = FlxMath.bound(((index < wavData[1][1].length && index >= 0) ? wavData[1][1][index] : 0) * (gSize / 1.12), -hSize, hSize) / 2;
+
+			waveformSprite.pixels.fillRect(new Rectangle(hSize - (lmin + rmin), index * size, (lmin + rmin) + (lmax + rmax), size), FlxColor.WHITE);
+		}
+		#else
+		waveformSprite.visible = false;
+		#end
+	}
+
+	function waveformData(buffer:AudioBuffer, bytes:Bytes, time:Float, endTime:Float, multiply:Float = 1, ?array:Array<Array<Array<Float>>>, ?steps:Float):Array<Array<Array<Float>>>
+	{
+		#if (lime_cffi && !macro)
+		if (buffer == null || buffer.data == null) return [[[0], [0]], [[0], [0]]];
+
+		var khz:Float = (buffer.sampleRate / 1000);
+		var channels:Int = buffer.channels;
+
+		var index:Int = Std.int(time * khz);
+
+		var samples:Float = ((endTime - time) * khz);
+
+		if (steps == null) steps = 1280;
+
+		var samplesPerRow:Float = samples / steps;
+		var samplesPerRowI:Int = Std.int(samplesPerRow);
+
+		var gotIndex:Int = 0;
+
+		var lmin:Float = 0;
+		var lmax:Float = 0;
+
+		var rmin:Float = 0;
+		var rmax:Float = 0;
+
+		var rows:Float = 0;
+
+		var simpleSample:Bool = true;//samples > 17200;
+		var v1:Bool = false;
+
+		if (array == null) array = [[[0], [0]], [[0], [0]]];
+
+		while (index < (bytes.length - 1)) {
+			if (index >= 0) {
+				var byte:Int = bytes.getUInt16(index * channels * 2);
+
+				if (byte > 65535 / 2) byte -= 65535;
+
+				var sample:Float = (byte / 65535);
+
+				if (sample > 0)
+					if (sample > lmax) lmax = sample;
+				else if (sample < 0)
+					if (sample < lmin) lmin = sample;
+
+				if (channels >= 2) {
+					byte = bytes.getUInt16((index * channels * 2) + 2);
+
+					if (byte > 65535 / 2) byte -= 65535;
+
+					sample = (byte / 65535);
+
+					if (sample > 0) {
+						if (sample > rmax) rmax = sample;
+					} else if (sample < 0) {
+						if (sample < rmin) rmin = sample;
+					}
+				}
+			}
+
+			v1 = samplesPerRowI > 0 ? (index % samplesPerRowI == 0) : false;
+			while (simpleSample ? v1 : rows >= samplesPerRow) {
+				v1 = false;
+				rows -= samplesPerRow;
+
+				gotIndex++;
+
+				var lRMin:Float = Math.abs(lmin) * multiply;
+				var lRMax:Float = lmax * multiply;
+
+				var rRMin:Float = Math.abs(rmin) * multiply;
+				var rRMax:Float = rmax * multiply;
+
+				if (gotIndex > array[0][0].length) array[0][0].push(lRMin);
+					else array[0][0][gotIndex - 1] = array[0][0][gotIndex - 1] + lRMin;
+
+				if (gotIndex > array[0][1].length) array[0][1].push(lRMax);
+					else array[0][1][gotIndex - 1] = array[0][1][gotIndex - 1] + lRMax;
+
+				if (channels >= 2)
+				{
+					if (gotIndex > array[1][0].length) array[1][0].push(rRMin);
+						else array[1][0][gotIndex - 1] = array[1][0][gotIndex - 1] + rRMin;
+
+					if (gotIndex > array[1][1].length) array[1][1].push(rRMax);
+						else array[1][1][gotIndex - 1] = array[1][1][gotIndex - 1] + rRMax;
+				}
+				else
+				{
+					if (gotIndex > array[1][0].length) array[1][0].push(lRMin);
+						else array[1][0][gotIndex - 1] = array[1][0][gotIndex - 1] + lRMin;
+
+					if (gotIndex > array[1][1].length) array[1][1].push(lRMax);
+						else array[1][1][gotIndex - 1] = array[1][1][gotIndex - 1] + lRMax;
+				}
+
+				lmin = 0;
+				lmax = 0;
+
+				rmin = 0;
+				rmax = 0;
+			}
+
+			index++;
+			rows++;
+			if(gotIndex > steps) break;
+		}
+
+		return array;
+		#else
+		return [[[0], [0]], [[0], [0]]];
+		#end
+	}
+}
